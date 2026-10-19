@@ -53,16 +53,27 @@ def render_cuda(
     background_color: Float[Tensor, "batch 3"],
     gaussian_means: Float[Tensor, "batch gaussian 3"],
     gaussian_covariances: Float[Tensor, "batch gaussian 3 3"],
-    gaussian_sh_coefficients: Float[Tensor, "batch gaussian 3 d_sh"],
+    gaussian_sh_coefficients: Float[Tensor, "batch gaussian 3 d_sh"] | None,
     gaussian_opacities: Float[Tensor, "batch gaussian"],
     gaussian_rotations: Float[Tensor, "batch gaussian 4"],
     gaussian_scales: Float[Tensor, "batch gaussian 3"],
     scale_invariant: bool = True,
     use_sh: bool = True,
     enable_cov_grad: bool = False,
-    enable_sh_grad: bool = False
+    enable_sh_grad: bool = False,
+    gaussian_colors: Float[Tensor, "batch gaussian 3"] | None = None,
 ) :
-    assert use_sh or gaussian_sh_coefficients.shape[-1] == 1
+    # sg_wrapper: precomputed per-Gaussian colors (SG parametrization) take
+    # the colors_precomp path; pass gaussian_sh_coefficients=None then.
+    if gaussian_colors is not None:
+        assert gaussian_sh_coefficients is None
+        shs = None
+        degree = None
+    else:
+        assert use_sh or gaussian_sh_coefficients.shape[-1] == 1
+        _, _, _, n = gaussian_sh_coefficients.shape
+        degree = isqrt(n) - 1
+        shs = rearrange(gaussian_sh_coefficients, "b g xyz n -> b g n xyz").contiguous()
 
     # Make sure everything is in a range where numerical issues don't appear.
     if scale_invariant:
@@ -75,10 +86,6 @@ def render_cuda(
         near = near * scale
         far = far * scale
         # print(near, far)
-
-    _, _, _, n = gaussian_sh_coefficients.shape
-    degree = isqrt(n) - 1
-    shs = rearrange(gaussian_sh_coefficients, "b g xyz n -> b g n xyz").contiguous()
 
     b, _, _ = extrinsics.shape
     h, w = image_shape
@@ -120,7 +127,7 @@ def render_cuda(
             scale_modifier=1.0,
             # viewmatrix=view_matrix[i],
             projmatrix=projection_matrix[i],
-            sh_degree=degree,
+            sh_degree=degree if degree is not None else 0,
             # campos=extrinsics[i, :3, 3],
             prefiltered=False,  # This matches the original usage.
             debug=False,
@@ -146,7 +153,17 @@ def render_cuda(
         #         viewmatrix = view_matrix[i]
         #     )
 
-        image, rendered_alpha, _ = rasterization(gaussian_means[i], gaussian_rotations[i], gaussian_scales[i], gaussian_opacities[i], shs[i],
+        # gsplat >=1.5: the 5th positional `colors` takes SH coefficients
+        # (G, K, 3) when sh_degree is set, or precomputed colors (G, D) when
+        # sh_degree is None (there is no colors_precomp kwarg anymore).
+        if shs is not None:
+            colors_arg = shs[i]
+        elif gaussian_colors is not None:
+            colors_arg = gaussian_colors[i]
+        else:
+            colors_arg = None
+
+        image, rendered_alpha, _ = rasterization(gaussian_means[i], gaussian_rotations[i], gaussian_scales[i], gaussian_opacities[i], colors_arg,
                                         view_matrix[i][None], test_intr_i[i][None], w, h, sh_degree=degree,
                                         # near_plane=near[i].mean(), far_plane=far[i].mean(),
                                         render_mode="RGB+D", packed=False,

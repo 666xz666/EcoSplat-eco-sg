@@ -49,23 +49,66 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
         depth_mode: DepthRenderingMode | None = None,
     ) -> DecoderOutput:
         b, v, _, _ = extrinsics.shape
-        color, depth, alpha = render_cuda(
-            rearrange(extrinsics, "b v i j -> (b v) i j"),
-            rearrange(intrinsics, "b v i j -> (b v) i j"),
-            rearrange(near, "b v -> (b v)"),
-            rearrange(far, "b v -> (b v)"),
-            image_shape,
-            repeat(self.background_color, "c -> (b v) c", b=b, v=v),
-            repeat(gaussians.means, "b g xyz -> (b v) g xyz", v=v),
-            repeat(gaussians.covariances, "b g i j -> (b v) g i j", v=v),
-            repeat(gaussians.harmonics, "b g c d_sh -> (b v) g c d_sh", v=v),
-            repeat(gaussians.opacities, "b g -> (b v) g", v=v),
-            repeat(gaussians.rotations, "b g i -> (b v) g i", v=v),
-            repeat(gaussians.scales, "b g i -> (b v) g i", v=v),
-            scale_invariant=self.make_scale_invariant,
-            enable_cov_grad=self.enable_cov_grad,
-            enable_sh_grad=self.enable_sh_grad
-        )
+        # sg_wrapper: SG-parametrized Gaussians carry lobe color parameters
+        # instead of SH coefficients; evaluate per-view colors in Python and
+        # hand them to the rasterizer as precomputed colors. SGGaussians
+        # subclasses types.Gaussians, so the forward() type annotation holds
+        # for both. The import is guarded so stock runs without sg_wrapper
+        # installed are unaffected.
+        sg_gaussians_cls = None
+        try:
+            from sg_wrapper import SGGaussians as sg_gaussians_cls
+        except ImportError:
+            pass
+
+        if sg_gaussians_cls is not None and isinstance(gaussians, sg_gaussians_cls):
+            from sg_wrapper import compute_sg_colors
+
+            sg_colors = compute_sg_colors(
+                repeat(gaussians.means, "b g xyz -> (b v) g xyz", v=v),
+                repeat(gaussians.rgb_base, "b g c -> (b v) g c", v=v),
+                repeat(gaussians.sg_directions, "b g l xyz -> (b v) g l xyz", v=v),
+                repeat(gaussians.sg_sharpness, "b g l s -> (b v) g l s", v=v),
+                repeat(gaussians.sg_rgb, "b g l c -> (b v) g l c", v=v),
+                rearrange(extrinsics, "b v i j -> (b v) i j"),
+                clamp_colors=getattr(gaussians, "clamp_colors", False),
+            )
+            color, depth, alpha = render_cuda(
+                rearrange(extrinsics, "b v i j -> (b v) i j"),
+                rearrange(intrinsics, "b v i j -> (b v) i j"),
+                rearrange(near, "b v -> (b v)"),
+                rearrange(far, "b v -> (b v)"),
+                image_shape,
+                repeat(self.background_color, "c -> (b v) c", b=b, v=v),
+                repeat(gaussians.means, "b g xyz -> (b v) g xyz", v=v),
+                repeat(gaussians.covariances, "b g i j -> (b v) g i j", v=v),
+                None,
+                repeat(gaussians.opacities, "b g -> (b v) g", v=v),
+                repeat(gaussians.rotations, "b g i -> (b v) g i", v=v),
+                repeat(gaussians.scales, "b g i -> (b v) g i", v=v),
+                scale_invariant=self.make_scale_invariant,
+                enable_cov_grad=self.enable_cov_grad,
+                enable_sh_grad=self.enable_sh_grad,
+                gaussian_colors=sg_colors,
+            )
+        else:
+            color, depth, alpha = render_cuda(
+                rearrange(extrinsics, "b v i j -> (b v) i j"),
+                rearrange(intrinsics, "b v i j -> (b v) i j"),
+                rearrange(near, "b v -> (b v)"),
+                rearrange(far, "b v -> (b v)"),
+                image_shape,
+                repeat(self.background_color, "c -> (b v) c", b=b, v=v),
+                repeat(gaussians.means, "b g xyz -> (b v) g xyz", v=v),
+                repeat(gaussians.covariances, "b g i j -> (b v) g i j", v=v),
+                repeat(gaussians.harmonics, "b g c d_sh -> (b v) g c d_sh", v=v),
+                repeat(gaussians.opacities, "b g -> (b v) g", v=v),
+                repeat(gaussians.rotations, "b g i -> (b v) g i", v=v),
+                repeat(gaussians.scales, "b g i -> (b v) g i", v=v),
+                scale_invariant=self.make_scale_invariant,
+                enable_cov_grad=self.enable_cov_grad,
+                enable_sh_grad=self.enable_sh_grad
+            )
         color = rearrange(color, "(b v) c h w -> b v c h w", b=b, v=v)
 
         

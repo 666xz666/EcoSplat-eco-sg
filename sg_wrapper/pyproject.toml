@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sg-wrapper"
+version = "0.1.0"
+description = "Spherical-Gaussian (MEGS2-style) color parametrization for feed-forward 3DGS hosts (EcoSplat/SPFSplat base)"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+dependencies = [
+    "torch>=2.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["sg_wrapper*"]

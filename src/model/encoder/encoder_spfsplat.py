@@ -61,6 +61,7 @@ class EncoderSPFSplatCfg:
     estimating_focal: bool = False
     estimating_pose: bool = True
     igf: Optional[dict] = None  # ecosplat IGF stage-2 finetune cfg; None disables.
+    sg: Optional[dict] = None  # sg_wrapper spherical-Gaussian color cfg; None = stock SH.
 
 
 
@@ -83,7 +84,17 @@ class EncoderSPFSplat(Encoder[EncoderSPFSplatCfg]):
         self.backbone = get_backbone(cfg.backbone, 3)
 
         self.pose_free = cfg.pose_free
-        if self.pose_free:
+        # sg_wrapper: spherical-Gaussian color parametrization (MEGS2-style).
+        # None keeps the stock SH adapter; the SG adapter shares the
+        # UnifiedGaussianAdapter interface, so call sites do not change.
+        self.sg = None
+        if cfg.sg is not None:
+            assert cfg.igf is None, "cfg sg and igf are mutually exclusive"
+            assert cfg.pose_free, "the SG adapter currently requires the pose-free path"
+            from sg_wrapper import SGAdapterCfg, UnifiedSGGaussianAdapter
+            self.sg = SGAdapterCfg(**dict(cfg.sg))
+            self.gaussian_adapter = UnifiedSGGaussianAdapter(cfg.gaussian_adapter, self.sg)
+        elif self.pose_free:
             self.gaussian_adapter = UnifiedGaussianAdapter(cfg.gaussian_adapter)
         else:
             self.gaussian_adapter = GaussianAdapter(cfg.gaussian_adapter)
@@ -131,6 +142,18 @@ class EncoderSPFSplat(Encoder[EncoderSPFSplatCfg]):
             )
             for p in self.igf.parameters():
                 p.requires_grad = True
+
+        # sg_wrapper: partial stage-1 init for representation-swap runs (SG
+        # head or reduced-SH baselines). Loads backbone / center / pose
+        # heads and the param-head trunk; the parametrization-specific final
+        # conv keeps a fresh init except its aligned leading channels
+        # (density, scale, rotation, c0/SH-DC). Which modules actually train
+        # is controlled by train.freeze_pretrained / freeze_pose_head.
+        if cfg.pretrained_weights and cfg.igf is None:
+            from sg_wrapper import init_encoder_from_stage1
+            init_encoder_from_stage1(self, cfg.pretrained_weights)
+            # Signals src/main.py to skip its own (shape-strict) reload.
+            self._stage1_partial_loaded = True
 
     def set_center_head(self, output_mode, head_type, landscape_only, depth_mode, conf_mode):
         self.backbone.depth_mode = depth_mode
@@ -202,10 +225,11 @@ class EncoderSPFSplat(Encoder[EncoderSPFSplatCfg]):
         device = context["image"].device
         b, v_cxt, _, h, w = context["image"].shape
 
-        if self.training and self.igf is None:
+        if self.training and self.igf is None and not self.cfg.pretrained_weights:
             raise RuntimeError(
-                "cfg.model.encoder.igf must be set for stage-2 training. "
-                "Got None; set `model.encoder.igf: {}` in your experiment yaml."
+                "stage-2 training needs either cfg.model.encoder.igf "
+                "(`model.encoder.igf: {}`) or a stage-1 checkpoint via "
+                "cfg.model.encoder.pretrained_weights."
             )
 
         if target is not None:
@@ -396,6 +420,9 @@ class EncoderSPFSplat(Encoder[EncoderSPFSplatCfg]):
         encoder_output = dict()
 
         def _flatten_gaussians(g):
+            if self.sg is not None:
+                from sg_wrapper import flatten_sg_gaussians
+                return flatten_sg_gaussians(g)
             return Gaussians(
                 rearrange(g.means, "b v r srf spp xyz -> b (v r srf spp) xyz"),
                 rearrange(g.covariances, "b v r srf spp i j -> b (v r srf spp) i j"),

@@ -166,7 +166,14 @@ def train(cfg_dict: DictConfig):
         distiller = distiller.eval()
 
     # Load the encoder weights.
-    if cfg.model.encoder.pretrained_weights and cfg.mode == "train":
+    # sg_wrapper: when the encoder already ran the partial stage-1 init
+    # (representation-swap runs: SG head / reduced-SH baselines), skip this
+    # loader — a strict=False load would raise on the resized param heads.
+    if (
+        cfg.model.encoder.pretrained_weights
+        and cfg.mode == "train"
+        and not getattr(encoder, "_stage1_partial_loaded", False)
+    ):
         weight_path = cfg.model.encoder.pretrained_weights
         ckpt_weights = torch.load(weight_path, map_location='cpu')
         if 'model' in ckpt_weights:
