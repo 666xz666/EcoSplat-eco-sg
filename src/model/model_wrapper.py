@@ -83,6 +83,9 @@ class TrainCfg:
     freeze_pretrained: bool 
     freeze_backbone: bool
     freeze_pose_head: bool 
+    # 冻结 intrinsic_encoder（骨干内的相机嵌入）。它可训练时整条 ViT 的
+    # 反向图都要保留，显存显著上升；只训参数头的实验不需要它自适应。
+    freeze_intrinsic_encoder: bool = False
 
 
 
@@ -153,6 +156,10 @@ class ModelWrapper(LightningModule):
 
         if self.train_cfg.freeze_pose_head:
             self.freeze_params(freeze_keywords=['pose_head'])
+
+        # 最后再冻 intrinsic_encoder（freeze_pretrained 会把它放开）
+        if getattr(self.train_cfg, "freeze_intrinsic_encoder", False):
+            self.freeze_params(freeze_keywords=['intrinsic_encoder'])
 
         self.ckpt_path = None
 

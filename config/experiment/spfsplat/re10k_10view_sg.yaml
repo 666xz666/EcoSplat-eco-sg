@@ -68,6 +68,7 @@ train:
   # trainable — same for every variant, so comparisons stay fair).
   freeze_pretrained: true
   freeze_pose_head: true
+  freeze_intrinsic_encoder: true
 
 test:
   output_path: outputs/test/sg3

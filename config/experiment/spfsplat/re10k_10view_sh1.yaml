@@ -65,6 +65,7 @@ train:
   training_context: false
   freeze_pretrained: true
   freeze_pose_head: true
+  freeze_intrinsic_encoder: true
 
 test:
   output_path: outputs/test/sh1
