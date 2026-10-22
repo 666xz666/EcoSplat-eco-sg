@@ -5,6 +5,23 @@ from .sg_adapter import (
     _get_sg_gaussians_class,
 )
 from .sg_colors import C0, compute_sg_colors
+from .sg_prune import (
+    BASE_FLOATS,
+    LOBE_FLOATS,
+    apply_runtime_lobe_budget,
+    budget_floats,
+    compensate_pruned_lobes,
+    compensation_factor,
+    get_lobe_budget,
+    lobe_budget_mask,
+    lobe_importance,
+    lobe_stats,
+    lobes_to_keep,
+    prune_lobes,
+    set_lobe_budget,
+    storage_floats,
+    storage_report,
+)
 from .stage1_loader import init_encoder_from_stage1
 
 __all__ = [
@@ -15,6 +32,21 @@ __all__ = [
     "compute_sg_colors",
     "init_encoder_from_stage1",
     "C0",
+    "BASE_FLOATS",
+    "LOBE_FLOATS",
+    "apply_runtime_lobe_budget",
+    "budget_floats",
+    "compensate_pruned_lobes",
+    "compensation_factor",
+    "get_lobe_budget",
+    "lobe_budget_mask",
+    "lobe_importance",
+    "lobe_stats",
+    "lobes_to_keep",
+    "prune_lobes",
+    "set_lobe_budget",
+    "storage_floats",
+    "storage_report",
 ]
 
 

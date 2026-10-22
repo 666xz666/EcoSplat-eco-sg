@@ -62,7 +62,13 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
             pass
 
         if sg_gaussians_cls is not None and isinstance(gaussians, sg_gaussians_cls):
-            from sg_wrapper import compute_sg_colors
+            from sg_wrapper import apply_runtime_lobe_budget, compute_sg_colors
+
+            # Inference-time lobe budget (rho_lobe). Returns a pruned copy
+            # with compensated c0 when a budget is configured; a no-op
+            # otherwise, so training and the unpruned evaluation are
+            # unchanged.
+            gaussians = apply_runtime_lobe_budget(gaussians)
 
             sg_colors = compute_sg_colors(
                 repeat(gaussians.means, "b g xyz -> (b v) g xyz", v=v),

@@ -15,7 +15,9 @@ config-gated hooks (see `INTEGRATION_SG.md`).
 | `sg_adapter.py` | `UnifiedSGGaussianAdapter` (drop-in for `UnifiedGaussianAdapter`), `SGGaussians`, `flatten_sg_gaussians` |
 | `sg_colors.py` | `compute_sg_colors` — batched port of MEGS² `compute_colors_precomp` |
 | `stage1_loader.py` | `init_encoder_from_stage1` — partial init from a stage-1 (PGT) checkpoint |
+| `sg_prune.py` | post-hoc lobe budget: importance, global top-K, closed-form c0 compensation, storage accounting |
 | `tests/test_sg_colors.py` | CPU sanity checks vs a literal transcription of the MEGS² formula |
+| `tests/test_sg_prune.py` | CPU checks for budget counts, top-K, compensation, edge cases, accounting |
 
 ## Method summary
 
@@ -37,7 +39,8 @@ Deliberate deviations from MEGS² (both configurable in `SGAdapterCfg`):
 * MEGS² clamps colors to [0, 1] during training; the SH path does not, so
   `clamp_colors` defaults to `False` for a fair comparison.
 * MEGS² stores a per-point lobe count; the feed-forward head predicts a
-  fixed count per point (no masking needed at this stage).
+  fixed count per point. A per-point budget is applied after the fact by
+  `sg_prune` (see below).
 
 ## Install
 
@@ -55,7 +58,8 @@ model:
     pretrained_weights: pretrained_weights/re10k_10view.ckpt
     sg: { num_lobes: 3 }
 train:
-  freeze_pretrained: true   # only gaussian_param_head* (+intrinsic_encoder) train
+  freeze_pretrained: true   # only gaussian_param_head* train
+  freeze_intrinsic_encoder: true
   freeze_pose_head: true
 ```
 
@@ -63,7 +67,7 @@ train:
 
 ## Experiments
 
-Three variants share one recipe (stage-1 partial init, heads-only training,
+These variants share one recipe (stage-1 partial init, heads-only training,
 100k steps, batch 1 × accum 4):
 
 | Variant | Color params / Gaussian | Config |
@@ -71,14 +75,55 @@ Three variants share one recipe (stage-1 partial init, heads-only training,
 | SG 3-lobe (main) | 24 | `re10k_10view_sg.yaml` |
 | SH degree 1 (lower squeeze) | 12 | `re10k_10view_sh1.yaml` |
 | SH degree 2 (upper squeeze) | 27 | `re10k_10view_sh2.yaml` |
+| SH degree 4 (same-recipe reference) | 75 | `re10k_10view_sh4.yaml` |
 
 ```bash
-./train_sg.sh sg3   # or sh1 / sh2
+./train_sg.sh sg3   # or sh1 / sh2 / sh4
 ```
+
+The SH4 run is optional: the released stage-1 checkpoint is a different-
+recipe anchor, so this run exists only to put the whole SH family on equal
+training footing.
 
 The SG parametrization must beat both SH baselines at matched training
 budget for the representation claim to hold (its parameter count lies
 between them).
+
+## Post-hoc lobe budget (ρ_lobe)
+
+`sg_prune.py` is the inference-time half of the second control axis. For each
+scene it ranks every lobe with MEGS²'s range metric and keeps a global budget:
+
+    D_l = mean_c |a_lc| · (1 − e^{−2 s_l})
+    keep round(L̄ · G) lobes with the largest D
+    Δc0 = a_l · (1 − e^{−2 s_l}) / (2 s_l)      # exact sphere-mean compensation
+
+```python
+from sg_wrapper import prune_lobes, storage_report
+
+pruned, stats = prune_lobes(g, avg_lobes=1.0)    # g: SGGaussians
+stats["avg_lobes"], stats["histogram"]           # actual L̄, counts for d=0..L
+storage_report(pruned)                           # 14 + 7·L̄ floats per point
+```
+
+Removed lobes get zero amplitude, so the padded tensors stay rectangular;
+their sphere-average color is folded into `c0`, which preserves the average
+view color exactly. Geometry is untouched.
+
+Evaluation sweeps use the decoder hook, which reads `SG_LOBE_AVG` (or
+`set_lobe_budget`) — one checkpoint yields the whole curve:
+
+```bash
+for b in 3 2 1 0; do
+  SG_LOBE_AVG=$b ./eval_sg.sh sg3 CKPT=outputs/.../checkpoint.ckpt
+done
+```
+
+Storage is accounted from the kept count (`14 + 7L̄` floats: position 3,
+opacity 1, scale 3, rotation 4, c0 3, plus 7 per lobe), which is what a
+grouped export writes. Padded GPU tensors still occupy `3L` slots until
+compaction is implemented, so storage and render-VRAM savings are reported
+separately.
 
 ## Partial stage-1 init (`stage1_loader`)
 
@@ -102,5 +147,7 @@ The same loader serves the SG head (83 → 32) and the SH baselines
   pose-free config is the default for this base.
 * PLY export and the orthographic render path still expect SH — they are
   unused by the training/eval protocol of these experiments.
-* `intrinsic_encoder` remains trainable under `freeze_pretrained` (host
-  behavior); identical across variants, so comparisons stay fair.
+* `freeze_pretrained` alone still unfreezes `intrinsic_encoder`, whose
+  gradient keeps the whole ViT graph alive (~23 GB at 256², 10 views). All
+  variant configs therefore set `train.freeze_intrinsic_encoder: true`;
+  the setting is identical across variants, so comparisons stay fair.

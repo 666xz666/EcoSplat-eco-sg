@@ -64,8 +64,8 @@ checkpointing:
 
 train:
   training_context: false
-  # Only the Gaussian parameter heads train (intrinsic_encoder also stays
-  # trainable — same for every variant, so comparisons stay fair).
+  # Only the Gaussian parameter heads train; intrinsic_encoder is frozen
+  # explicitly (same for every variant, so comparisons stay fair).
   freeze_pretrained: true
   freeze_pose_head: true
   freeze_intrinsic_encoder: true

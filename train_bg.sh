@@ -17,7 +17,7 @@ CONDA_ENV="${CONDA_ENV:-ecosplat}"
 CONDA_SH="${CONDA_SH:-/data1/xz/miniconda3/etc/profile.d/conda.sh}"
 RUN_DIR="${RUN_DIR:-$REPO/.run}"
 LOG_DIR="${LOG_DIR:-$REPO/logs}"
-VARIANTS="sg3 sh1 sh2"
+VARIANTS="sg3 sh1 sh2 sh4"
 
 mkdir -p "$RUN_DIR" "$LOG_DIR"
 
@@ -26,6 +26,7 @@ variant_experiment() {
         sg3) echo "spfsplat/re10k_10view_sg" ;;
         sh1) echo "spfsplat/re10k_10view_sh1" ;;
         sh2) echo "spfsplat/re10k_10view_sh2" ;;
+        sh4) echo "spfsplat/re10k_10view_sh4" ;;
         *) return 1 ;;
     esac
 }
@@ -38,7 +39,7 @@ is_running() {
 }
 
 start() {
-    local variant="${1:?usage: $0 start <sg3|sh1|sh2> [gpu_id] [hydra overrides...]}"; shift
+    local variant="${1:?usage: $0 start <sg3|sh1|sh2|sh4> [gpu_id] [hydra overrides...]}"; shift
     local gpu="${1:-0}"; shift || true
     local exp; exp=$(variant_experiment "$variant") || { echo "unknown variant: $variant" >&2; exit 2; }
 
@@ -144,7 +145,7 @@ case "${1:-}" in
         cat >&2 <<EOF
 usage: $(basename "$0") <command>
 
-  start <sg3|sh1|sh2> [gpu_id] [hydra overrides...]   后台启动
+  start <sg3|sh1|sh2|sh4> [gpu_id] [hydra overrides...]   后台启动
   stop  <variant>                                     停止
   status [variant]                                    状态 + 最近进度
   logs  <variant> [n=30]                              日志末尾

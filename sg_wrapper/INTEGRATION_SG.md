@@ -85,6 +85,8 @@ runs. Stock behavior (IGF configs, matching shapes) is unchanged.
 
 * `ecosplat_wrapper/` (IGF) — untouched; `sg` and `igf` never combine.
 * Losses, dataset, optimizer, Lightning plumbing — untouched.
-* `train.freeze_pretrained` / `train.freeze_pose_head` (existing host
-  switches) define what trains: only `gaussian_param_head*` (plus
-  `intrinsic_encoder`, host behavior, identical across variants).
+* `train.freeze_pretrained` / `train.freeze_pose_head` /
+  `train.freeze_intrinsic_encoder` define what trains: only
+  `gaussian_param_head*`. The third switch is required because
+  `freeze_pretrained` unfreezes `intrinsic_encoder` at the ViT input, which
+  keeps the whole backbone graph alive; it is identical across variants.

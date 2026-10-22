@@ -10,7 +10,7 @@ set -euo pipefail
 : "${CUDA_VISIBLE_DEVICES:=0}"
 export CUDA_VISIBLE_DEVICES
 
-VARIANT="${1:?usage: ./eval_sg.sh sg3|sh1|sh2 (CKPT=... required)}"
+VARIANT="${1:?usage: ./eval_sg.sh sg3|sh1|sh2|sh4 (CKPT=... required)}"
 shift
 CKPT="${CKPT:?set CKPT=path/to/checkpoint.ckpt}"
 EVAL_INDEX="${EVAL_INDEX:-assets/evaluation_index_re10k.json}"
@@ -19,7 +19,8 @@ case "$VARIANT" in
     sg3) EXPERIMENT=spfsplat/re10k_10view_sg ;;
     sh1) EXPERIMENT=spfsplat/re10k_10view_sh1 ;;
     sh2) EXPERIMENT=spfsplat/re10k_10view_sh2 ;;
-    *) echo "unknown variant: $VARIANT (expected sg3 | sh1 | sh2)" >&2; exit 1 ;;
+    sh4) EXPERIMENT=spfsplat/re10k_10view_sh4 ;;
+    *) echo "unknown variant: $VARIANT (expected sg3 | sh1 | sh2 | sh4)" >&2; exit 1 ;;
 esac
 
 python -m src.main "+experiment=${EXPERIMENT}" \
