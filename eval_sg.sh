@@ -15,9 +15,11 @@ VARIANT="${1:?usage: ./eval_sg.sh sg3|sh1|sh2|sh4 (CKPT=... required)}"
 shift
 CKPT="${CKPT:?set CKPT=path/to/checkpoint.ckpt}"
 EVAL_INDEX="${EVAL_INDEX:-assets/evaluation_index_re10k.json}"
-# Match the training view count: the index stores 2 context views, and the
-# evaluation sampler adds random interior views up to this number. ACID uses 2.
-NUM_CONTEXT="${NUM_CONTEXT:-10}"
+# Official RE10K protocol: the model is trained with 10 context views but
+# evaluated with 24 (see eval_igf_rho0p02.sh and the paper's 16/20/24 tables).
+# The index stores 2 context views and the sampler adds random interior views
+# up to this number. ACID uses 2; a 10-view ablation can pass NUM_CONTEXT=10.
+NUM_CONTEXT="${NUM_CONTEXT:-24}"
 
 case "$VARIANT" in
     sg3) EXPERIMENT=spfsplat/re10k_10view_sg ;;

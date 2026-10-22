@@ -119,9 +119,11 @@ for b in 3 2 1 0; do
 done
 ```
 
-`eval_sg.sh` defaults to `NUM_CONTEXT=10` to match the training view count
-(the evaluation index itself stores 2 context views; the sampler adds random
-interior views up to the requested number). Set `NUM_CONTEXT=2` for ACID.
+`eval_sg.sh` defaults to `NUM_CONTEXT=24`, the official RE10K protocol: the
+model is trained with 10 context views and evaluated with 24 (see
+`eval_igf_rho0p02.sh` and the paper's 16/20/24-view tables). The index stores
+2 context views; the sampler adds random interior views up to the requested
+number. Set `NUM_CONTEXT=2` for ACID, or `10` for a training-matched ablation.
 
 Storage is accounted from the kept count (`14 + 7L̄` floats: position 3,
 opacity 1, scale 3, rotation 4, c0 3, plus 7 per lobe), which is what a
