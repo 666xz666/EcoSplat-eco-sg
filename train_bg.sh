@@ -59,6 +59,10 @@ start() {
         echo \"[train_bg] \$(date '+%F %T') variant=$variant gpu=$gpu\"
         echo \"[train_bg] overrides: $*\"
         export PYTHONUNBUFFERED=1
+        # Keep CUDA device indices aligned with nvidia-smi. Without this,
+        # CUDA's FASTEST_FIRST ordering makes \`0\` the fastest card, not the
+        # first one, and a requested 3090 can silently land on a V100.
+        export CUDA_DEVICE_ORDER=PCI_BUS_ID
         export CUDA_VISIBLE_DEVICES=$gpu
         exec python -u -m src.main +experiment='$exp' \
             wandb.mode=offline wandb.name='$variant' $*
