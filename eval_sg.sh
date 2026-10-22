@@ -21,6 +21,19 @@ EVAL_INDEX="${EVAL_INDEX:-assets/evaluation_index_re10k.json}"
 # up to this number. ACID uses 2; a 10-view ablation can pass NUM_CONTEXT=10.
 NUM_CONTEXT="${NUM_CONTEXT:-24}"
 
+# Dataset root (contains train/ and test/). Auto-detect the layouts used so
+# far; override with DATA_ROOT=... when evaluating somewhere else.
+DATA_ROOT="${DATA_ROOT:-}"
+if [ -z "$DATA_ROOT" ]; then
+    for cand in "$PWD/datasets/re10k" /data14T/xz/data/re10k /data1/xz/data/re10k_full; do
+        if [ -d "$cand/train" ] && [ -d "$cand/test" ]; then
+            DATA_ROOT="$cand"
+            break
+        fi
+    done
+fi
+: "${DATA_ROOT:?set DATA_ROOT=path/to/re10k (containing train/ and test/)}"
+
 case "$VARIANT" in
     sg3) EXPERIMENT=spfsplat/re10k_10view_sg ;;
     sh1) EXPERIMENT=spfsplat/re10k_10view_sh1 ;;
@@ -36,6 +49,7 @@ python -m src.main "+experiment=${EXPERIMENT}" \
     dataset/view_sampler@dataset.re10k.view_sampler=evaluation \
     dataset.re10k.view_sampler.index_path="${EVAL_INDEX}" \
     dataset.re10k.view_sampler.num_context_views="${NUM_CONTEXT}" \
+    "dataset.re10k.roots=[${DATA_ROOT}]" \
     checkpointing.load="${CKPT}" \
     test.save_image=true test.align_pose=true \
     "test.output_path=outputs/test/eval_${VARIANT}" "$@"
