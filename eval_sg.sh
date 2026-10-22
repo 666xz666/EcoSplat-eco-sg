@@ -8,12 +8,16 @@
 set -euo pipefail
 
 : "${CUDA_VISIBLE_DEVICES:=0}"
+export CUDA_DEVICE_ORDER="${CUDA_DEVICE_ORDER:-PCI_BUS_ID}"
 export CUDA_VISIBLE_DEVICES
 
 VARIANT="${1:?usage: ./eval_sg.sh sg3|sh1|sh2|sh4 (CKPT=... required)}"
 shift
 CKPT="${CKPT:?set CKPT=path/to/checkpoint.ckpt}"
 EVAL_INDEX="${EVAL_INDEX:-assets/evaluation_index_re10k.json}"
+# Match the training view count: the index stores 2 context views, and the
+# evaluation sampler adds random interior views up to this number. ACID uses 2.
+NUM_CONTEXT="${NUM_CONTEXT:-10}"
 
 case "$VARIANT" in
     sg3) EXPERIMENT=spfsplat/re10k_10view_sg ;;
@@ -29,6 +33,7 @@ python -m src.main "+experiment=${EXPERIMENT}" \
     model.encoder.pretrained_weights="" \
     dataset/view_sampler@dataset.re10k.view_sampler=evaluation \
     dataset.re10k.view_sampler.index_path="${EVAL_INDEX}" \
+    dataset.re10k.view_sampler.num_context_views="${NUM_CONTEXT}" \
     checkpointing.load="${CKPT}" \
     test.save_image=true test.align_pose=true \
     "test.output_path=outputs/test/eval_${VARIANT}" "$@"

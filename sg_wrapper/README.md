@@ -119,6 +119,10 @@ for b in 3 2 1 0; do
 done
 ```
 
+`eval_sg.sh` defaults to `NUM_CONTEXT=10` to match the training view count
+(the evaluation index itself stores 2 context views; the sampler adds random
+interior views up to the requested number). Set `NUM_CONTEXT=2` for ACID.
+
 Storage is accounted from the kept count (`14 + 7L̄` floats: position 3,
 opacity 1, scale 3, rotation 4, c0 3, plus 7 per lobe), which is what a
 grouped export writes. Padded GPU tensors still occupy `3L` slots until
