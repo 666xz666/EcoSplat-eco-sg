@@ -14,7 +14,7 @@ set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONDA_ENV="${CONDA_ENV:-ecosplat}"
-CONDA_SH="${CONDA_SH:-/data1/xz/miniconda3/etc/profile.d/conda.sh}"
+CONDA_SH="${CONDA_SH:-$HOME/miniconda3/etc/profile.d/conda.sh}"
 RUN_DIR="${RUN_DIR:-$REPO/.run}"
 LOG_DIR="${LOG_DIR:-$REPO/logs}"
 VARIANTS="sg3 sh1 sh2 sh4"
