@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import copy
 import os
+from dataclasses import dataclass
 
 import torch
 from torch import Tensor
@@ -255,3 +256,270 @@ def prune_lobes(g, avg_lobes: float, inplace: bool = False):
         )
         out.sg_rgb = out.sg_rgb * mask.unsqueeze(-1).to(out.sg_rgb.dtype)
     return out, lobe_stats(mask)
+
+
+@dataclass
+class PackedLobes:
+    """Rectangular-free lobe storage for one scene.
+
+    ``directions/sharpness/rgb`` hold only the kept lobes, flattened to
+    ``[K, ...]``; ``point_index[k]`` says which Gaussian owns lobe ``k``.
+    ``counts[g]`` is the per-point kept count (0..L). Compared with the padded
+    ``[G, L, 7]`` layout this uses ``K`` rows instead of ``G*L``; at L̄=1 it is
+    3x smaller.
+    """
+
+    rgb_base: Tensor  # [G, 3], compensated diffuse term
+    directions: Tensor  # [K, 3]
+    sharpness: Tensor  # [K, 1]
+    rgb: Tensor  # [K, 3]
+    point_index: Tensor  # [K] long
+    counts: Tensor  # [G] long
+    n_points: int
+    n_lobes: int
+    num_lobes: int
+
+
+def pack_lobes(g, avg_lobes: float | None = None, total_lobes: int | None = None):
+    """Rank, compensate and pack one scene's lobes.
+
+    Exactly the same selection as :func:`prune_lobes`, but the result is a
+    :class:`PackedLobes` whose lobe tensors have one row per kept lobe instead
+    of ``G x L`` rows. Geometry is not stored here (it stays on the Gaussian
+    container); only ``c0`` and the lobe payload are needed for color.
+
+    Args:
+        g: object with ``rgb_base`` [G,3], ``sg_directions`` [G,L,3],
+            ``sg_sharpness`` [G,L,1] and ``sg_rgb`` [G,L,3]. Batched
+            containers are not supported (evaluation uses one scene).
+        avg_lobes: target average lobes per Gaussian; ``total_lobes`` may be
+            given instead for an exact byte budget.
+        total_lobes: exact number of lobes to keep (0..G*L).
+    """
+    if not all(
+        hasattr(g, a)
+        for a in ("rgb_base", "sg_directions", "sg_sharpness", "sg_rgb")
+    ):
+        raise TypeError("pack_lobes expects an SG Gaussian container")
+    sg_rgb, sg_dirs, sg_sharp, rgb_base_in = (
+        g.sg_rgb,
+        g.sg_directions,
+        g.sg_sharpness,
+        g.rgb_base,
+    )
+    if sg_rgb.dim() == 4:
+        if sg_rgb.shape[0] != 1:
+            raise ValueError(
+                "pack_lobes supports a leading batch of 1; got "
+                f"{tuple(sg_rgb.shape)}"
+            )
+        sg_rgb, sg_dirs, sg_sharp, rgb_base_in = (
+            sg_rgb[0],
+            sg_dirs[0],
+            sg_sharp[0],
+            rgb_base_in[0],
+        )
+    elif sg_rgb.dim() != 3:
+        raise ValueError(
+            "pack_lobes expects [G,L,3] or [1,G,L,3]; got "
+            f"{tuple(sg_rgb.shape)}"
+        )
+    n_points, num_lobes, _ = sg_rgb.shape
+    if total_lobes is None:
+        if avg_lobes is None:
+            avg_lobes = float(num_lobes)
+        total_lobes = lobes_to_keep(n_points, avg_lobes, num_lobes)
+    total_lobes = int(max(0, min(n_points * num_lobes, total_lobes)))
+    avg = total_lobes / n_points if n_points else 0.0
+
+    with torch.no_grad():
+        D = lobe_importance(sg_rgb, sg_sharp)
+        mask = lobe_budget_mask(D, avg)
+        rgb_base = compensate_pruned_lobes(
+            rgb_base_in, sg_rgb, sg_sharp, mask
+        )
+        idx = mask.nonzero(as_tuple=False)  # [K, 2] (point, lobe)
+        point_index = idx[:, 0].to(torch.long)
+        lobe_index = idx[:, 1].to(torch.long)
+        directions = sg_dirs[point_index, lobe_index]
+        sharpness = sg_sharp[point_index, lobe_index]
+        rgb = sg_rgb[point_index, lobe_index]
+        counts = mask.sum(dim=-1).to(torch.long)
+    return PackedLobes(
+        rgb_base=rgb_base,
+        directions=directions,
+        sharpness=sharpness,
+        rgb=rgb,
+        point_index=point_index,
+        counts=counts,
+        n_points=n_points,
+        n_lobes=int(point_index.numel()),
+        num_lobes=num_lobes,
+    )
+
+
+def compute_packed_sg_colors(
+    means: Tensor,
+    rgb_base: Tensor,
+    directions: Tensor,
+    sharpness: Tensor,
+    rgb: Tensor,
+    point_index: Tensor,
+    extrinsics: Tensor,
+    clamp_colors: bool = False,
+    eps: float = 1e-8,
+) -> Tensor:
+    """Evaluate colors from a packed lobe set.
+
+    Same math as :func:`compute_sg_colors`, but the lobes are a flat list with
+    ``point_index`` mapping each kept lobe to its Gaussian; the per-lobe
+    contribution is accumulated with ``index_add_``. Only the kept lobes are
+    stored, which is where the VRAM reduction comes from.
+
+    Args:
+        means: [B, G, 3]
+        rgb_base: [B, G, 3] in SH space (already compensated)
+        directions: [K, 3]
+        sharpness: [K, 1]
+        rgb: [K, 3]
+        point_index: [K] long, values in [0, G)
+        extrinsics: [B, 4, 4]
+        clamp_colors: clamp to [0, 1] like MEGS²
+
+    Returns:
+        [B, G, 3] RGB colors ready for gsplat's colors_precomp.
+    """
+    if means.dim() != 3:
+        raise ValueError(f"means must be [B,G,3], got {tuple(means.shape)}")
+    b, g, _ = means.shape
+    k = directions.shape[0]
+    if point_index.numel() != k or rgb.shape[0] != k:
+        raise ValueError("packed lobe tensors disagree on K")
+    dirs = torch.nn.functional.normalize(directions, dim=-1, eps=eps)
+    out = []
+    cam = extrinsics[:, :3, 3]
+    for bi in range(b):
+        view = cam[bi][None, :] - means[bi]  # [G, 3]
+        view = view / (view.norm(dim=-1, keepdim=True) + eps)
+        colors = rgb_base[bi].clone()
+        if k:
+            view_l = view[point_index]  # [K, 3]
+            cos = (dirs * view_l).sum(dim=-1, keepdim=True)  # [K, 1]
+            weighted = rgb * torch.exp(sharpness * (cos - 1.0))  # [K, 3]
+            colors.index_add_(0, point_index, weighted)
+        out.append(colors)
+    colors = torch.stack(out, dim=0)
+    colors = colors * 0.28209479177387814 + 0.5  # SH2RGB
+    if clamp_colors:
+        colors = colors.clamp(0.0, 1.0)
+    return colors
+
+
+def packed_floats(packed: PackedLobes) -> int:
+    """Stored floats for a packed scene: base per point + kept lobes."""
+    return storage_floats(packed.n_points, packed.n_lobes)
+
+
+def packed_bytes(packed: PackedLobes) -> int:
+    return packed_floats(packed) * 4
+
+
+def lobes_for_bytes(n_points: int, target_bytes: int, num_lobes: int) -> int:
+    """Exact lobe count that fits ``target_bytes`` (clamped to [0, G*L])."""
+    max_lobes = n_points * num_lobes
+    lobes = int((target_bytes / 4 - BASE_FLOATS * n_points) / LOBE_FLOATS + 0.5)
+    return max(0, min(max_lobes, lobes))
+
+
+def avg_lobes_for_bytes(n_points: int, target_bytes: int, num_lobes: int) -> float:
+    """Average lobes per Gaussian for a byte budget."""
+    return lobes_for_bytes(n_points, target_bytes, num_lobes) / n_points
+
+
+def pack_lobes_to_bytes(g, target_bytes: int):
+    """Pack a scene at an exact byte budget (base floats + kept lobes)."""
+    shape = g.sg_rgb.shape
+    n_points, num_lobes = shape[-3], shape[-2]
+    total = lobes_for_bytes(n_points, target_bytes, num_lobes)
+    return pack_lobes(g, total_lobes=total)
+
+
+def pack_into(g, avg_lobes: float):
+    """Return a copy of ``g`` whose color payload is packed, geometry intact.
+
+    The padded ``sg_directions/sg_sharpness/sg_rgb`` tensors are dropped (set
+    to ``None``) so the old rectangular payload can be freed; the decoder reads
+    the ``sg_packed_*`` fields instead. This is what makes the budget affect
+    actual VRAM rather than only accounting.
+    """
+    squeeze = g.sg_rgb.dim() == 4
+    packed = pack_lobes(g, avg_lobes=avg_lobes)
+    out = copy.deepcopy(g)
+    out.rgb_base = packed.rgb_base.unsqueeze(0) if squeeze else packed.rgb_base
+    out.sg_directions = None
+    out.sg_sharpness = None
+    out.sg_rgb = None
+    out.sg_packed_directions = packed.directions
+    out.sg_packed_sharpness = packed.sharpness
+    out.sg_packed_rgb = packed.rgb
+    out.sg_packed_index = packed.point_index
+    out.sg_lobe_counts = packed.counts
+    out.sg_num_lobes = packed.num_lobes
+    return out, packed
+
+
+_RUNTIME_PACKED = False
+
+
+def set_packed(enabled: bool | None = None) -> None:
+    """Enable/disable packed color storage for the runtime decoder hook."""
+    global _RUNTIME_PACKED
+    if enabled is None:
+        _RUNTIME_PACKED = os.environ.get("SG_PACKED", "0").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+    else:
+        _RUNTIME_PACKED = bool(enabled)
+
+
+def get_packed() -> bool:
+    return _RUNTIME_PACKED or os.environ.get("SG_PACKED", "0").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+def apply_runtime_lobe_budget(g):
+    """Prune (and optionally pack) to the configured budget, or return ``g``.
+
+    Unset budget -> no-op. ``SG_LOBE_AVG`` sets an average-lobe budget;
+    ``SG_BUDGET_MB`` sets a byte budget for the color payload
+    (``14*N + 7*L_total`` floats) and is converted per scene. ``SG_PACKED=1``
+    additionally drops the padded lobe tensors in favor of a packed layout,
+    which is what actually reduces VRAM.
+    """
+    if getattr(g, "sg_packed_directions", None) is not None:
+        return g
+    avg = get_lobe_budget()
+    if avg is None:
+        budget_mb = os.environ.get("SG_BUDGET_MB", "")
+        if budget_mb:
+            if g.sg_rgb.dim() != 3:
+                raise ValueError(
+                    "SG_BUDGET_MB supports one scene per forward; got "
+                    f"{tuple(g.sg_rgb.shape)}"
+                )
+            n_points, num_lobes, _ = g.sg_rgb.shape
+            avg = avg_lobes_for_bytes(
+                n_points, int(float(budget_mb) * 1024 * 1024), num_lobes
+            )
+    if avg is None:
+        return g
+    if get_packed():
+        out, _ = pack_into(g, avg)
+        return out
+    out, _ = prune_lobes(g, avg, inplace=False)
+    return out

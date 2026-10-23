@@ -62,23 +62,40 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
             pass
 
         if sg_gaussians_cls is not None and isinstance(gaussians, sg_gaussians_cls):
-            from sg_wrapper import apply_runtime_lobe_budget, compute_sg_colors
+            from sg_wrapper import (
+                apply_runtime_lobe_budget,
+                compute_packed_sg_colors,
+                compute_sg_colors,
+            )
 
             # Inference-time lobe budget (rho_lobe). Returns a pruned copy
             # with compensated c0 when a budget is configured; a no-op
             # otherwise, so training and the unpruned evaluation are
-            # unchanged.
+            # unchanged. With SG_PACKED=1 the padded lobe tensors are dropped
+            # and only the kept lobes (K x 7) are stored.
             gaussians = apply_runtime_lobe_budget(gaussians)
 
-            sg_colors = compute_sg_colors(
-                repeat(gaussians.means, "b g xyz -> (b v) g xyz", v=v),
-                repeat(gaussians.rgb_base, "b g c -> (b v) g c", v=v),
-                repeat(gaussians.sg_directions, "b g l xyz -> (b v) g l xyz", v=v),
-                repeat(gaussians.sg_sharpness, "b g l s -> (b v) g l s", v=v),
-                repeat(gaussians.sg_rgb, "b g l c -> (b v) g l c", v=v),
-                rearrange(extrinsics, "b v i j -> (b v) i j"),
-                clamp_colors=getattr(gaussians, "clamp_colors", False),
-            )
+            if getattr(gaussians, "sg_packed_directions", None) is not None:
+                sg_colors = compute_packed_sg_colors(
+                    repeat(gaussians.means, "b g xyz -> (b v) g xyz", v=v),
+                    repeat(gaussians.rgb_base, "b g c -> (b v) g c", v=v),
+                    gaussians.sg_packed_directions,
+                    gaussians.sg_packed_sharpness,
+                    gaussians.sg_packed_rgb,
+                    gaussians.sg_packed_index,
+                    rearrange(extrinsics, "b v i j -> (b v) i j"),
+                    clamp_colors=getattr(gaussians, "clamp_colors", False),
+                )
+            else:
+                sg_colors = compute_sg_colors(
+                    repeat(gaussians.means, "b g xyz -> (b v) g xyz", v=v),
+                    repeat(gaussians.rgb_base, "b g c -> (b v) g c", v=v),
+                    repeat(gaussians.sg_directions, "b g l xyz -> (b v) g l xyz", v=v),
+                    repeat(gaussians.sg_sharpness, "b g l s -> (b v) g l s", v=v),
+                    repeat(gaussians.sg_rgb, "b g l c -> (b v) g l c", v=v),
+                    rearrange(extrinsics, "b v i j -> (b v) i j"),
+                    clamp_colors=getattr(gaussians, "clamp_colors", False),
+                )
             color, depth, alpha = render_cuda(
                 rearrange(extrinsics, "b v i j -> (b v) i j"),
                 rearrange(intrinsics, "b v i j -> (b v) i j"),

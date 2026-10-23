@@ -69,6 +69,15 @@ def _get_sg_gaussians_class():
             # setting the adapter was configured with (MEGS2 clamps; the SH
             # path does not).
             clamp_colors: bool = False
+            # Optional packed color payload (set by sg_prune.pack_into when a
+            # byte budget is active). When present, the padded sg_* tensors
+            # above are dropped and the decoder evaluates colors from these.
+            sg_packed_directions: Tensor = None  # (K, 3)
+            sg_packed_sharpness: Tensor = None  # (K, 1)
+            sg_packed_rgb: Tensor = None  # (K, 3)
+            sg_packed_index: Tensor = None  # (K,) long
+            sg_lobe_counts: Tensor = None  # (G,) long
+            sg_num_lobes: int = 0
 
         _SG_GAUSSIANS_CLS = SGGaussians
     return _SG_GAUSSIANS_CLS

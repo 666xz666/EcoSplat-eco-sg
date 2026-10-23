@@ -127,9 +127,31 @@ number. Set `NUM_CONTEXT=2` for ACID, or `10` for a training-matched ablation.
 
 Storage is accounted from the kept count (`14 + 7L̄` floats: position 3,
 opacity 1, scale 3, rotation 4, c0 3, plus 7 per lobe), which is what a
-grouped export writes. Padded GPU tensors still occupy `3L` slots until
-compaction is implemented, so storage and render-VRAM savings are reported
-separately.
+grouped export writes. Padded GPU tensors still occupy `3L` slots until the
+packed layout below is enabled, so storage and render-VRAM savings are
+reported separately.
+
+### Byte budget and packed storage
+
+The control quantity can be a target payload size instead of L̄:
+
+    B = 4 · (14·N + 7·L_total)
+    L_total = (B/4 − 14·N) / 7
+
+`pack_lobes_to_bytes(g, B)` selects exactly `L_total` lobes globally and
+returns a `PackedLobes` whose lobe tensors are `[K, …]` (only kept lobes)
+plus a `point_index` map; `packed_bytes()` reports the actual payload. The
+decoder hook accepts the same budget through the environment:
+
+```bash
+SG_PACKED=1 SG_BUDGET_MB=80 ./eval_sg.sh sg3 CKPT=...
+```
+
+With `SG_PACKED=1`, `apply_runtime_lobe_budget` drops the padded
+`sg_directions/sg_sharpness/sg_rgb` tensors and evaluates colors with
+`compute_packed_sg_colors`, so the VRAM reduction is real rather than only
+accounting. `SG_LOBE_AVG` remains available as the average-lobe shorthand;
+if both are set, `SG_LOBE_AVG` wins.
 
 ## Partial stage-1 init (`stage1_loader`)
 
