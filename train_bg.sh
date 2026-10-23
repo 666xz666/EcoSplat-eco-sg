@@ -17,7 +17,7 @@ CONDA_ENV="${CONDA_ENV:-ecosplat}"
 CONDA_SH="${CONDA_SH:-$HOME/miniconda3/etc/profile.d/conda.sh}"
 RUN_DIR="${RUN_DIR:-$REPO/.run}"
 LOG_DIR="${LOG_DIR:-$REPO/logs}"
-VARIANTS="sg3 sh1 sh2 sh4"
+VARIANTS="sg3 sh1 sh2 sh4 sg3_igf sh2_igf sh4_igf"
 
 mkdir -p "$RUN_DIR" "$LOG_DIR"
 
@@ -27,6 +27,10 @@ variant_experiment() {
         sh1) echo "spfsplat/re10k_10view_sh1" ;;
         sh2) echo "spfsplat/re10k_10view_sh2" ;;
         sh4) echo "spfsplat/re10k_10view_sh4" ;;
+        # stage 2: IGF (rho_N axis) on top of a stage-1 representation base
+        sg3_igf) echo "spfsplat/re10k_10view_sg_igf" ;;
+        sh2_igf) echo "spfsplat/re10k_10view_sh2_igf" ;;
+        sh4_igf) echo "spfsplat/re10k_10view_sh4_igf" ;;
         *) return 1 ;;
     esac
 }
@@ -39,7 +43,7 @@ is_running() {
 }
 
 start() {
-    local variant="${1:?usage: $0 start <sg3|sh1|sh2|sh4> [gpu_id] [hydra overrides...]}"; shift
+    local variant="${1:?usage: $0 start <variant> [gpu_id] [hydra overrides...]}"; shift
     local gpu="${1:-0}"; shift || true
     local exp; exp=$(variant_experiment "$variant") || { echo "unknown variant: $variant" >&2; exit 2; }
 

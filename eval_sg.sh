@@ -11,7 +11,7 @@ set -euo pipefail
 export CUDA_DEVICE_ORDER="${CUDA_DEVICE_ORDER:-PCI_BUS_ID}"
 export CUDA_VISIBLE_DEVICES
 
-VARIANT="${1:?usage: ./eval_sg.sh sg3|sh1|sh2|sh4 (CKPT=... required)}"
+VARIANT="${1:?usage: ./eval_sg.sh sg3|sh1|sh2|sh4|<v>_igf (CKPT=... required)}"
 shift
 CKPT="${CKPT:?set CKPT=path/to/checkpoint.ckpt}"
 EVAL_INDEX="${EVAL_INDEX:-assets/evaluation_index_re10k.json}"
@@ -34,22 +34,38 @@ if [ -z "$DATA_ROOT" ]; then
 fi
 : "${DATA_ROOT:?set DATA_ROOT=path/to/re10k (containing train/ and test/)}"
 
+# IGF variants strict-load model.encoder.pretrained_weights when the encoder is
+# built (the stage-2 checkpoint then overwrites all weights via
+# checkpointing.load), so the stage-1 BASE checkpoint must be supplied.
+# RHO is the rho_N control evaluated here; default is the paper's 0.4.
+IGF=0
+PRETRAINED=""
 case "$VARIANT" in
     sg3) EXPERIMENT=spfsplat/re10k_10view_sg ;;
     sh1) EXPERIMENT=spfsplat/re10k_10view_sh1 ;;
     sh2) EXPERIMENT=spfsplat/re10k_10view_sh2 ;;
     sh4) EXPERIMENT=spfsplat/re10k_10view_sh4 ;;
-    *) echo "unknown variant: $VARIANT (expected sg3 | sh1 | sh2 | sh4)" >&2; exit 1 ;;
+    sg3_igf) EXPERIMENT=spfsplat/re10k_10view_sg_igf; IGF=1 ;;
+    sh2_igf) EXPERIMENT=spfsplat/re10k_10view_sh2_igf; IGF=1 ;;
+    sh4_igf) EXPERIMENT=spfsplat/re10k_10view_sh4_igf; IGF=1 ;;
+    *) echo "unknown variant: $VARIANT (expected sg3 | sh1 | sh2 | sh4 | sg3_igf | sh2_igf | sh4_igf)" >&2; exit 1 ;;
 esac
+if [ "$IGF" = "1" ]; then
+    : "${BASE_CKPT:?IGF variants need BASE_CKPT=path/to/stage-1 checkpoint (same head width as the run)}"
+    PRETRAINED="$BASE_CKPT"
+fi
+RHO="${RHO:-}"
+[ "$IGF" = "1" ] || RHO=""   # the key only exists under model.encoder.igf
 
 python -m src.main "+experiment=${EXPERIMENT}" \
     mode=test \
     wandb.mode=disabled "wandb.name=eval_${VARIANT}" \
-    model.encoder.pretrained_weights="" \
+    model.encoder.pretrained_weights="${PRETRAINED}" \
     dataset/view_sampler@dataset.re10k.view_sampler=evaluation \
     dataset.re10k.view_sampler.index_path="${EVAL_INDEX}" \
     dataset.re10k.view_sampler.num_context_views="${NUM_CONTEXT}" \
     "dataset.re10k.roots=[${DATA_ROOT}]" \
     checkpointing.load="${CKPT}" \
     test.save_image=true test.align_pose=true \
-    "test.output_path=outputs/test/eval_${VARIANT}" "$@"
+    "test.output_path=outputs/test/eval_${VARIANT}" \
+    ${RHO:+"+model.encoder.igf.inference_rho=${RHO}"} "$@"

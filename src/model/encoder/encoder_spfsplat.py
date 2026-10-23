@@ -89,7 +89,9 @@ class EncoderSPFSplat(Encoder[EncoderSPFSplatCfg]):
         # UnifiedGaussianAdapter interface, so call sites do not change.
         self.sg = None
         if cfg.sg is not None:
-            assert cfg.igf is None, "cfg sg and igf are mutually exclusive"
+            # sg + igf is the stage-2 combination: IGF is color-agnostic (it
+            # deep-copies whatever param head is present and its losses touch
+            # only opacity/geometry), so the SG head merges exactly like SH.
             assert cfg.pose_free, "the SG adapter currently requires the pose-free path"
             from sg_wrapper import SGAdapterCfg, UnifiedSGGaussianAdapter
             self.sg = SGAdapterCfg(**dict(cfg.sg))
@@ -120,6 +122,14 @@ class EncoderSPFSplat(Encoder[EncoderSPFSplatCfg]):
         # IGF stage-2 module (clones gaussian param heads + image embed).
         self.igf = None
         if cfg.igf is not None:
+            if not cfg.pretrained_weights:
+                raise ValueError(
+                    "IGF strict-loads the base checkpoint inside the encoder, so"
+                    " model.encoder.pretrained_weights must point at a checkpoint"
+                    " with the SAME head width as this config (the"
+                    " representation-adapted base, e.g. sg3_step30000.ckpt for"
+                    " the SG variant)."
+                )
             from collections import OrderedDict
             stage1_statedict = torch.load(cfg.pretrained_weights, map_location='cpu')['state_dict']
             weights_to_load = OrderedDict({}) # 변수 이름 변경 (더 명확하게)
