@@ -56,8 +56,10 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
         # for both. The import is guarded so stock runs without sg_wrapper
         # installed are unaffected.
         sg_gaussians_cls = None
+        sh_budget = None
         try:
             from sg_wrapper import SGGaussians as sg_gaussians_cls
+            from sg_wrapper import apply_runtime_sh_budget as sh_budget
         except ImportError:
             pass
 
@@ -115,6 +117,10 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                 gaussian_colors=sg_colors,
             )
         else:
+            # SH arm of the colour budget: SH_KEEP_DEGREE drops whole SH
+            # bands at inference (a no-op when the variable is unset).
+            if sh_budget is not None:
+                gaussians = sh_budget(gaussians)
             color, depth, alpha = render_cuda(
                 rearrange(extrinsics, "b v i j -> (b v) i j"),
                 rearrange(intrinsics, "b v i j -> (b v) i j"),

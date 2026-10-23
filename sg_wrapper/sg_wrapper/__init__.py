@@ -33,6 +33,16 @@ from .sg_prune import (
     storage_floats,
     storage_report,
 )
+from .sh_prune import (
+    SH_BASE_FLOATS,
+    apply_runtime_sh_budget,
+    degree_of,
+    lobe_equivalent,
+    set_sh_keep_degree,
+    sh_num_coeffs,
+    sh_storage_floats,
+    truncate_sh,
+)
 from .stage1_loader import init_encoder_from_stage1
 
 __all__ = [
@@ -69,6 +79,14 @@ __all__ = [
     "set_packed",
     "storage_floats",
     "storage_report",
+    "SH_BASE_FLOATS",
+    "apply_runtime_sh_budget",
+    "degree_of",
+    "lobe_equivalent",
+    "set_sh_keep_degree",
+    "sh_num_coeffs",
+    "sh_storage_floats",
+    "truncate_sh",
 ]
 
 
