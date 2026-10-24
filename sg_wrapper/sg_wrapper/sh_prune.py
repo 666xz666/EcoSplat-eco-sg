@@ -261,7 +261,7 @@ def apply_sh_allocation(g, color_floats: float):
     """
     degrees = allocate_degrees(g.harmonics, color_floats)
     d_sh = g.harmonics.shape[-1]
-    keep = torch.arange(d_sh, device=g.harmonics.device) < (degrees + 1) ** 2
+    keep = torch.arange(d_sh, device=g.harmonics.device) < ((degrees + 1) ** 2).unsqueeze(-1)
     h = g.harmonics * keep.unsqueeze(-2)
     return dataclasses.replace(g, harmonics=h.contiguous()), degrees
 
