@@ -129,6 +129,140 @@ def truncate_sh(g, keep_degree: int):
     return dataclasses.replace(g, harmonics=g.harmonics[..., :n].contiguous())
 
 
+# ---------------------------------------------------------------------------
+# Per-point degree allocation (the strongest SH baseline)
+#
+# Uniform truncation (:func:`truncate_sh`) is the weakest way to spend an SH
+# budget: every point gets the same degree. The strongest post-hoc SH
+# opponent gives each point its own degree, storing a coefficient prefix
+# (bands are ordered, so degree k means bands 0..k). The allocation below
+# searches two-level splits — n points stay at the full degree, the rest drop
+# to a lower one — and keeps the split with the largest preserved band
+# energy, which is the optimal allocation within that family and mirrors how
+# mixed-degree storage is actually laid out. Coefficients above a point's
+# degree are zeroed rather than sliced away (the tensor stays rectangular);
+# since bands l >= 1 integrate to zero over the sphere, zeroing is
+# numerically identical to removal.
+# ---------------------------------------------------------------------------
+
+
+def band_energy(harmonics: Tensor) -> Tensor:
+    """Per-point L2 energy of each non-DC band.
+
+    Args:
+        harmonics: (..., 3, d_sh) coefficients.
+
+    Returns:
+        (..., degree) tensor; entry k is the energy of band k+1, i.e. the
+        band a point only stores when its degree is >= k+1.
+    """
+    degree = degree_of(harmonics)
+    return torch.stack(
+        [
+            harmonics[..., sh_num_coeffs(b - 1) : sh_num_coeffs(b)].norm(dim=(-1, -2))
+            for b in range(1, degree + 1)
+        ],
+        dim=-1,
+    )
+
+
+def two_level_split(n_points: int, hi_c: int, lo_c: int, color_floats: float) -> int:
+    """Points kept at the high level when the rest drop to the low one.
+
+    Args:
+        n_points: total number of points.
+        hi_c: coefficients per channel at the high level.
+        lo_c: coefficients per channel at the low level.
+        color_floats: average colour floats per point (budget / n_points).
+
+    Returns:
+        Floor of the solution of ``n_hi * hi_c + (n - n_hi) * lo_c ==
+        budget / 3``; any fractional remainder stays unspent (at scene scale
+        the slack is < one upgrade and shrinking with G).
+    """
+    if hi_c == lo_c:
+        return n_points
+    total_coeffs = color_floats / 3.0 * n_points
+    n_hi = (total_coeffs - lo_c * n_points) / (hi_c - lo_c)
+    return int(min(max(n_hi, 0.0), float(n_points)))
+
+
+def allocate_degrees(harmonics: Tensor, color_floats: float) -> Tensor:
+    """Per-point SH degrees under an average colour-float budget.
+
+    Args:
+        harmonics: (..., 3, d_sh) coefficients.
+        color_floats: target average floats per point spent on colour
+            coefficients (3 for degree 0, up to 3 * (degree + 1) ** 2).
+
+    Returns:
+        (...) long tensor of per-point degrees.
+
+    Raises:
+        ValueError: if the budget is below the degree-0 floor (3 floats).
+    """
+    if color_floats < 3:
+        raise ValueError(f"color_floats must be >= 3 (degree-0 floor), got {color_floats}")
+    degree = degree_of(harmonics)
+    shape = harmonics.shape[:-2]
+    if color_floats >= 3 * sh_num_coeffs(degree):
+        return torch.full(shape, degree, dtype=torch.long, device=harmonics.device)
+
+    flat = harmonics.reshape(-1, harmonics.shape[-1])  # (G, 3 * d_sh)
+    G = flat.shape[0]
+    energies = band_energy(flat)  # (G, degree)
+
+    best_degrees: Tensor | None = None
+    best_value = -1.0
+    for low in range(0, degree):
+        n_hi = two_level_split(G, sh_num_coeffs(degree), sh_num_coeffs(low), color_floats)
+        # Marginal value of high vs low for each point: bands low+1..degree.
+        marginal = energies[:, low:].sum(dim=-1)
+        order = torch.argsort(marginal, descending=True)
+        degrees = torch.full((G,), low, dtype=torch.long, device=flat.device)
+        if n_hi > 0:
+            degrees[order[:n_hi]] = degree
+        # Preserved energy: everyone keeps bands 1..low, the chosen few also low+1..degree.
+        value = energies[:, :low].sum().item() + marginal[order[:n_hi]].sum().item()
+        if value > best_value:
+            best_value, best_degrees = value, degrees
+    assert best_degrees is not None
+    return best_degrees.reshape(shape)
+
+
+def allocation_floats(degrees: Tensor) -> float:
+    """Average colour floats per point implied by a degree assignment.
+
+    Args:
+        degrees: (...) long tensor from :func:`allocate_degrees`.
+
+    Returns:
+        ``mean(3 * (degrees + 1) ** 2)`` — the number to quote next to the
+        budget on the same x-axis as the SG arm's ``14 + 7L``.
+    """
+    return float((3 * (degrees + 1) ** 2).sum() / degrees.numel())
+
+
+def apply_sh_allocation(g, color_floats: float):
+    """Return ``(g, degrees)`` with coefficients above each point degree zeroed.
+
+    The harmonics tensor keeps its width (rectangular, batch-friendly); the
+    accounting in :func:`allocation_floats` counts only the stored prefix.
+
+    Args:
+        g: Gaussians dataclass with ``harmonics`` (..., 3, d_sh).
+        color_floats: average colour-float budget per point.
+
+    Returns:
+        Tuple of the budgeted Gaussians copy and the (...) degree tensor.
+    """
+    degrees = allocate_degrees(g.harmonics, color_floats)
+    d_sh = g.harmonics.shape[-1]
+    keep = torch.arange(d_sh, device=g.harmonics.device) < (degrees + 1) ** 2
+    h = g.harmonics * keep.unsqueeze(-2)
+    return dataclasses.replace(g, harmonics=h.contiguous()), degrees
+
+
 _RUNTIME_KEEP: int | None = None
 
 
@@ -155,6 +289,31 @@ def get_sh_keep_degree() -> int | None:
     return int(env)
 
 
+_RUNTIME_ALLOC: float | None = None
+
+
+def set_sh_alloc(color_floats: float | None) -> None:
+    """Set (or clear with ``None``) the per-point colour-float budget."""
+    global _RUNTIME_ALLOC
+    if color_floats is not None and color_floats < 3:
+        raise ValueError(f"color_floats must be >= 3, got {color_floats}")
+    _RUNTIME_ALLOC = None if color_floats is None else float(color_floats)
+
+
+def get_sh_alloc() -> float | None:
+    """Runtime allocation budget, else ``SH_ALLOC_COLOR_FLOATS``.
+
+    Takes precedence over ``SH_KEEP_DEGREE`` when both are set: per-point
+    allocation is the stronger axis.
+    """
+    if _RUNTIME_ALLOC is not None:
+        return _RUNTIME_ALLOC
+    env = os.environ.get("SH_ALLOC_COLOR_FLOATS", "")
+    if env == "":
+        return None
+    return float(env)
+
+
 def apply_runtime_sh_budget(g):
     """Truncate to the configured degree, or return ``g`` unchanged.
 
@@ -162,6 +321,10 @@ def apply_runtime_sh_budget(g):
     a narrower, contiguous harmonics tensor, so the caller's tensors (and any
     autograd graph) are untouched.
     """
+    alloc = get_sh_alloc()
+    if alloc is not None:
+        out, _ = apply_sh_allocation(g, alloc)
+        return out
     keep = get_sh_keep_degree()
     if keep is None:
         return g

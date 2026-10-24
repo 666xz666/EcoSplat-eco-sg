@@ -35,6 +35,10 @@ from .sg_prune import (
 )
 from .sh_prune import (
     SH_BASE_FLOATS,
+    allocate_degrees,
+    allocation_floats,
+    apply_sh_allocation,
+    band_energy,
     apply_runtime_sh_budget,
     degree_of,
     lobe_equivalent,
@@ -87,6 +91,11 @@ __all__ = [
     "sh_num_coeffs",
     "sh_storage_floats",
     "truncate_sh",
+    "allocate_degrees",
+    "allocation_floats",
+    "apply_sh_allocation",
+    "band_energy",
+    "set_sh_alloc",
 ]
 
 
