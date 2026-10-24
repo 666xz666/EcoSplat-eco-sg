@@ -89,12 +89,9 @@ def test_zeroing_equals_truncation():
     out, degrees = apply_sh_allocation(g, 17)
     assert out.harmonics.shape == g.harmonics.shape
     for i in range(8):
-        want = truncate_sh(
-            FakeGaussians(g.means[i : i + 1], g.harmonics[i : i + 1], g.opacities[i : i + 1]),
-            int(degrees[i]),
-        ).harmonics
-        got = out.harmonics[i]
-        assert torch.equal(got, want[0]), i
+        n = sh_num_coeffs(int(degrees[i]))
+        assert torch.equal(out.harmonics[i, :, :n], g.harmonics[i, :, :n]), i
+        assert (out.harmonics[i, :, n:] == 0).all(), i
     assert torch.equal(out.means, g.means) and torch.equal(g.harmonics[0, :, :1], out.harmonics[0, :, :1])
     print("OK  per-point zeroing matches per-point truncation; DC untouched")
 
