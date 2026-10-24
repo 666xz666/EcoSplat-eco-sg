@@ -121,7 +121,7 @@ def test_runtime_hook_precedence():
     degrees = allocate_degrees(g.harmonics, 12)
     assert torch.equal(
         out.harmonics != 0,
-        (torch.arange(25) < (degrees + 1) ** 2).unsqueeze(-1).expand(4, 3, 25),
+        (torch.arange(25) < ((degrees + 1) ** 2).unsqueeze(-1)).unsqueeze(1).expand(4, 3, 25),
     )
     del os.environ["SH_KEEP_DEGREE"], os.environ["SH_ALLOC_COLOR_FLOATS"]
 
