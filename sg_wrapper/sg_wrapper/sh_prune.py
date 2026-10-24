@@ -208,7 +208,7 @@ def allocate_degrees(harmonics: Tensor, color_floats: float) -> Tensor:
     if color_floats >= 3 * sh_num_coeffs(degree):
         return torch.full(shape, degree, dtype=torch.long, device=harmonics.device)
 
-    flat = harmonics.reshape(-1, harmonics.shape[-1])  # (G, 3 * d_sh)
+    flat = harmonics.reshape(-1, *harmonics.shape[-2:])  # (G, 3, d_sh)
     G = flat.shape[0]
     energies = band_energy(flat)  # (G, degree)
 
