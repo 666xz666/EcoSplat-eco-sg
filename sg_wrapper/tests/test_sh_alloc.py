@@ -54,7 +54,7 @@ def test_band_energy():
     h[0, 1, 4:9] = 3.0
     e = band_energy(h)
     assert abs(e[0, 0].item() - (3.0 ** 0.5)) < 1e-6
-    assert abs(e[0, 1].item() - 9.0) < 1e-6
+    assert abs(e[0, 1].item() - (45.0 ** 0.5)) < 1e-6
     print("OK  band_energy per-band L2")
 
 
