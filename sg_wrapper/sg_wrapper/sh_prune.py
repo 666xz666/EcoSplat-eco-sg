@@ -215,6 +215,9 @@ def allocate_degrees(harmonics: Tensor, color_floats: float) -> Tensor:
     best_degrees: Tensor | None = None
     best_value = -1.0
     for low in range(0, degree):
+        # n_hi 钳到 0 时“低档”必须自己装得下预算，否则该切分不可行。
+        if 3 * sh_num_coeffs(low) > color_floats:
+            continue
         n_hi = two_level_split(G, sh_num_coeffs(degree), sh_num_coeffs(low), color_floats)
         # Marginal value of high vs low for each point: bands low+1..degree.
         marginal = energies[:, low:].sum(dim=-1)
