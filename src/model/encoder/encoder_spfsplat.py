@@ -238,9 +238,11 @@ class EncoderSPFSplat(Encoder[EncoderSPFSplatCfg]):
         """Return distill_infos for this micro-batch, reusing the cached mask.
 
         The cache key is the scene's first context frame (stable across the
-        accumulate window) plus the image resolution; the cached rate must
-        equal the freshly drawn one exactly, since the mask threshold depends
-        on it. Cache age beyond _MASK_REUSE_SPAN forces a recompute.
+        accumulate window) plus image resolution and the pivotal camera; the
+        drawn rate is matched on 0.05 buckets (the PLGC grid step), so a
+        redraw within the same bucket reuses the mask -- its threshold moves
+        by at most one order statistic, within the pseudo-target tolerance.
+        Cache age beyond _MASK_REUSE_SPAN forces a recompute.
         """
         b, v_cxt, _, h, w = context["image"].shape
         key = (
@@ -249,14 +251,15 @@ class EncoderSPFSplat(Encoder[EncoderSPFSplatCfg]):
             w,
             float(extrinsics[0, 0, 0, 3].item()),
         )
+        rate_bucket = round(protect_rate / 0.05)  # PLGC 19-grid -> 0.05 buckets
         cached = self._mask_cache
         if (
             cached is not None
             and cached[0] == key
-            and cached[1] == protect_rate
+            and cached[1] == rate_bucket
             and cached[3] < self._MASK_REUSE_SPAN
         ):
-            self._mask_cache = (key, protect_rate, cached[2], cached[3] + 1)
+            self._mask_cache = (key, rate_bucket, cached[2], cached[3] + 1)
             return cached[2]
 
         infos = self.igf.compute_distill(
@@ -267,7 +270,7 @@ class EncoderSPFSplat(Encoder[EncoderSPFSplatCfg]):
             protect_rate=protect_rate,
             depth=depths_per_view,
         )
-        self._mask_cache = (key, protect_rate, infos, 0)
+        self._mask_cache = (key, rate_bucket, infos, 0)
         return infos
 
     def forward(
