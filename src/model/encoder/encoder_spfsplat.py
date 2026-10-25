@@ -153,6 +153,13 @@ class EncoderSPFSplat(Encoder[EncoderSPFSplatCfg]):
             for p in self.igf.parameters():
                 p.requires_grad = True
 
+        # IGF importance-mask cache: the mask is detached pseudo-GT and its
+        # CPU/GPU pipeline (variation map, quantile, bipartite matching) is
+        # the per-micro-batch bottleneck; consecutive micro-batches of the
+        # same scene at the same drawn rate reproduce it bit-exactly, so we
+        # reuse it within a small staleness span instead.
+        self._mask_cache = None  # (key, rate, infos, age)
+
         # sg_wrapper: partial stage-1 init for representation-swap runs (SG
         # head or reduced-SH baselines). Loads backbone / center / pose
         # heads and the param-head trunk; the parametrization-specific final
@@ -224,6 +231,44 @@ class EncoderSPFSplat(Encoder[EncoderSPFSplatCfg]):
         return head(decout, img_shape, ray_embedding=ray_embedding)
     
     
+
+    _MASK_REUSE_SPAN = 3  # micro-batches a cached mask may serve
+
+    def _cached_distill(self, context, extrinsics, protect_rate, means_pix, cov_pix, depths_per_view):
+        """Return distill_infos for this micro-batch, reusing the cached mask.
+
+        The cache key is the scene's first context frame (stable across the
+        accumulate window) plus the image resolution; the cached rate must
+        equal the freshly drawn one exactly, since the mask threshold depends
+        on it. Cache age beyond _MASK_REUSE_SPAN forces a recompute.
+        """
+        b, v_cxt, _, h, w = context["image"].shape
+        key = (
+            int(context["index"][0, 0].item()),
+            h,
+            w,
+            float(extrinsics[0, 0, 0, 3].item()),
+        )
+        cached = self._mask_cache
+        if (
+            cached is not None
+            and cached[0] == key
+            and cached[1] == protect_rate
+            and cached[3] < self._MASK_REUSE_SPAN
+        ):
+            self._mask_cache = (key, protect_rate, cached[2], cached[3] + 1)
+            return cached[2]
+
+        infos = self.igf.compute_distill(
+            ori_gaussians={"means_pix": means_pix, "cov_pix": cov_pix},
+            image=context["image"],
+            intrinsics=context["intrinsics"],
+            extrinsics=extrinsics,
+            protect_rate=protect_rate,
+            depth=depths_per_view,
+        )
+        self._mask_cache = (key, protect_rate, infos, 0)
+        return infos
 
     def forward(
         self,
@@ -449,13 +494,8 @@ class EncoderSPFSplat(Encoder[EncoderSPFSplatCfg]):
                 encoder_output["ori_gaussians"] = ori_flat
                 means_pix = gaussians.means.reshape(b, v_cxt, h, w, 3)
                 cov_pix = gaussians.covariances.reshape(b, v_cxt, h, w, 3, 3)
-                distill_infos = self.igf.compute_distill(
-                    ori_gaussians={"means_pix": means_pix, "cov_pix": cov_pix},
-                    image=context["image"],
-                    intrinsics=context["intrinsics"],
-                    extrinsics=context_extrinsics,
-                    protect_rate=protect_rate,
-                    depth=depths_per_view,
+                distill_infos = self._cached_distill(
+                    context, context_extrinsics, protect_rate, means_pix, cov_pix, depths_per_view
                 )
                 distill_infos["pred_opacity"] = merged_opacities_per_pixel
                 encoder_output["distill_infos"] = distill_infos
