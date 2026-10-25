@@ -1,4 +1,5 @@
 from .ports import (
+    row_quantile,
     get_grad_map,
     get_normal_map,
     normalized_view_plane_uv,
@@ -9,6 +10,7 @@ from .ports import (
 )
 
 __all__ = [
+    "row_quantile",
     "get_grad_map",
     "get_normal_map",
     "normalized_view_plane_uv",
