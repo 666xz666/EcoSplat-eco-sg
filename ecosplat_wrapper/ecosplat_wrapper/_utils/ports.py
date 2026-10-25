@@ -121,29 +121,6 @@ def mps_gather_workaround(input, dim, index):
         return torch.gather(input, dim, index)
 
 
-def row_quantile(x: Tensor, q: float, dim: int) -> Tensor:
-    """``torch.quantile(x, q, dim=dim)`` via kthvalue (same semantics, much faster).
-
-    torch.quantile materialises sorted copies and serialises over the
-    reduction dim; the threshold here is a single order statistic per row,
-    which kthvalue computes directly. Up-cast to float32 because kthvalue on
-    fp16/bf16 rows is slow and imprecise, while the surrounding boolean
-    separation is resolution-insensitive.
-
-    Args:
-        x: input tensor.
-        q: quantile in [0, 1].
-        dim: reduction dim.
-
-    Returns:
-        Tensor of x.dtype with ``dim`` removed.
-    """
-    n = x.shape[dim]
-    k = max(1, min(n, int(torch.ceil(torch.tensor(q * n)).item())))
-    out = x.float().kthvalue(k, dim=dim).values
-    return out.to(x.dtype)
-
-
 def bipartite_soft_matching_random2d(
     metric: torch.Tensor,
     w: int, h: int, sx: int, sy: int, r: int, p: int,

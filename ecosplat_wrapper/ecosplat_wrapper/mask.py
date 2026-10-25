@@ -11,7 +11,6 @@ import torch
 from torch import Tensor
 
 from ._utils import (
-    row_quantile,
     bipartite_soft_matching_random2d,
     get_grad_map,
     get_normal_map,
@@ -67,7 +66,7 @@ def generate_importance_mask(
         .transpose(2, 3)
         .reshape(bv, h // sy, w // sx, sx * sy)
     )
-    grad_thes = row_quantile(patch_grad_map.sum(-1).flatten(1, 2), 1.0 - protect_rate, dim=1)
+    grad_thes = torch.quantile(patch_grad_map.sum(-1).flatten(1, 2), 1.0 - protect_rate, dim=1)
     merge_mask = torch.le(patch_grad_map.sum(-1), grad_thes[:, None, None])
     full_merge_mask = (
         merge_mask.unsqueeze(-1)
