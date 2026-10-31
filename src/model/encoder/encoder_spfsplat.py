@@ -62,6 +62,7 @@ class EncoderSPFSplatCfg:
     estimating_pose: bool = True
     igf: Optional[dict] = None  # ecosplat IGF stage-2 finetune cfg; None disables.
     sg: Optional[dict] = None  # sg_wrapper spherical-Gaussian color cfg; None = stock SH.
+    min_protect_rate: float = 1.0 / 16.0  # PLGC top-K floor; set 0.05 to match paper 5% level.
 
 
 
@@ -429,7 +430,7 @@ class EncoderSPFSplat(Encoder[EncoderSPFSplatCfg]):
             merged_opacities_per_pixel = merged_opacity_mapped.flatten(-3, -1)
 
             # Top-k by per-pixel opacity (paper PLGC selection); rendered set shrinks with rho.
-            k = int(max(protect_rate, 1.0 / 16.0) * h * w)
+            k = int(max(protect_rate, self.cfg.min_protect_rate) * h * w)
             _, top_idx = torch.topk(merged_opacities_per_pixel, k=k, dim=-1)
             pts_topk = torch.gather(
                 pts_all, 2,
