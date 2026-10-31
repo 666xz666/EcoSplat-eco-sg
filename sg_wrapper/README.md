@@ -75,7 +75,7 @@ These variants share one recipe (stage-1 partial init, heads-only training,
 | SG 3-lobe (main) | 24 | `re10k_10view_sg.yaml` |
 | SH degree 1 (lower squeeze) | 12 | `re10k_10view_sh1.yaml` |
 | SH degree 2 (upper squeeze) | 27 | `re10k_10view_sh2.yaml` |
-| SH degree 4 (same-recipe reference) | 75 | `re10k_10view_sh4.yaml` |
+| SH degree 4 (same-recipe reference) | 75 | `sg/re10k_10view_sh4.yaml` |
 
 ```bash
 ./train_sg.sh sg3   # or sh1 / sh2 / sh4

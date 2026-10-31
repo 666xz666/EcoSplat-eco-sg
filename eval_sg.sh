@@ -41,13 +41,13 @@ fi
 IGF=0
 PRETRAINED=""
 case "$VARIANT" in
-    sg3) EXPERIMENT=spfsplat/re10k_10view_sg ;;
-    sh1) EXPERIMENT=spfsplat/re10k_10view_sh1 ;;
-    sh2) EXPERIMENT=spfsplat/re10k_10view_sh2 ;;
-    sh4) EXPERIMENT=spfsplat/re10k_10view_sh4 ;;
-    sg3_igf) EXPERIMENT=spfsplat/re10k_10view_sg_igf; IGF=1 ;;
-    sh2_igf) EXPERIMENT=spfsplat/re10k_10view_sh2_igf; IGF=1 ;;
-    sh4_igf) EXPERIMENT=spfsplat/re10k_10view_sh4_igf; IGF=1 ;;
+    sg3) EXPERIMENT=spfsplat/sg/re10k_10view_sg ;;
+    sh1) EXPERIMENT=spfsplat/sg/re10k_10view_sh1 ;;
+    sh2) EXPERIMENT=spfsplat/sg/re10k_10view_sh2 ;;
+    sh4) EXPERIMENT=spfsplat/sg/re10k_10view_sh4 ;;
+    sg3_igf) EXPERIMENT=spfsplat/sg/re10k_10view_sg_igf; IGF=1 ;;
+    sh2_igf) EXPERIMENT=spfsplat/sg/re10k_10view_sh2_igf; IGF=1 ;;
+    sh4_igf) EXPERIMENT=spfsplat/sg/re10k_10view_sh4_igf; IGF=1 ;;
     *) echo "unknown variant: $VARIANT (expected sg3 | sh1 | sh2 | sh4 | sg3_igf | sh2_igf | sh4_igf)" >&2; exit 1 ;;
 esac
 if [ "$IGF" = "1" ]; then

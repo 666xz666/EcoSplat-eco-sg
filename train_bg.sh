@@ -23,14 +23,14 @@ mkdir -p "$RUN_DIR" "$LOG_DIR"
 
 variant_experiment() {
     case "$1" in
-        sg3) echo "spfsplat/re10k_10view_sg" ;;
-        sh1) echo "spfsplat/re10k_10view_sh1" ;;
-        sh2) echo "spfsplat/re10k_10view_sh2" ;;
-        sh4) echo "spfsplat/re10k_10view_sh4" ;;
+        sg3) echo "spfsplat/sg/re10k_10view_sg" ;;
+        sh1) echo "spfsplat/sg/re10k_10view_sh1" ;;
+        sh2) echo "spfsplat/sg/re10k_10view_sh2" ;;
+        sh4) echo "spfsplat/sg/re10k_10view_sh4" ;;
         # stage 2: IGF (rho_N axis) on top of a stage-1 representation base
-        sg3_igf) echo "spfsplat/re10k_10view_sg_igf" ;;
-        sh2_igf) echo "spfsplat/re10k_10view_sh2_igf" ;;
-        sh4_igf) echo "spfsplat/re10k_10view_sh4_igf" ;;
+        sg3_igf) echo "spfsplat/sg/re10k_10view_sg_igf" ;;
+        sh2_igf) echo "spfsplat/sg/re10k_10view_sh2_igf" ;;
+        sh4_igf) echo "spfsplat/sg/re10k_10view_sh4_igf" ;;
         *) return 1 ;;
     esac
 }

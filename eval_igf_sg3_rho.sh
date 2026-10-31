@@ -15,7 +15,7 @@ BASE="${BASE:-/data14T/xz/ckpt_archive/sg3_step20000.ckpt}"
 EVAL_INDEX="${EVAL_INDEX:-assets/evaluation_index_re10k.json}"
 RUN_NAME="sg3_igf_rho${RHO//./p}"
 
-python -m src.main +experiment=spfsplat/re10k_10view_sg \
+python -m src.main +experiment=spfsplat/sg/re10k_10view_sg \
     mode=test \
     wandb.mode=disabled wandb.name="${RUN_NAME}" \
     "+model.encoder.igf={inference_rho:${RHO}}" \

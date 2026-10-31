@@ -20,10 +20,10 @@ export CUDA_VISIBLE_DEVICES
 
 VARIANT="${1:-sg3}"
 case "$VARIANT" in
-    sg3) EXPERIMENT=spfsplat/re10k_10view_sg ;;
-    sh1) EXPERIMENT=spfsplat/re10k_10view_sh1 ;;
-    sh2) EXPERIMENT=spfsplat/re10k_10view_sh2 ;;
-    sh4) EXPERIMENT=spfsplat/re10k_10view_sh4 ;;
+    sg3) EXPERIMENT=spfsplat/sg/re10k_10view_sg ;;
+    sh1) EXPERIMENT=spfsplat/sg/re10k_10view_sh1 ;;
+    sh2) EXPERIMENT=spfsplat/sg/re10k_10view_sh2 ;;
+    sh4) EXPERIMENT=spfsplat/sg/re10k_10view_sh4 ;;
     *) echo "unknown variant: $VARIANT (expected sg3 | sh1 | sh2 | sh4)" >&2; exit 1 ;;
 esac
 
