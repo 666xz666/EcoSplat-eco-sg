@@ -5,6 +5,15 @@ from .sg_adapter import (
     _get_sg_gaussians_class,
 )
 from .sg_colors import C0, compute_sg_colors
+from .budget import (
+    Allocation,
+    GRID,
+    allocate,
+    allocate_two_stage,
+    dense_floats,
+    ratio_to_kappa,
+    snap_budget,
+)
 from .sg_prune import (
     BASE_FLOATS,
     LOBE_FLOATS,
