@@ -190,8 +190,13 @@ def test_price_all_value_in_lobes():
     assert a.target - a.achieved < BASE_FLOATS
 
 
-def test_price_is_a_threshold():
-    """With repair off, ``beta`` really is the cut every item was tested against."""
+def test_price_sets_the_level_menu():
+    """``beta`` fixes the level of every kept point; the budget fixes the count.
+
+    With repair off the kept set must be a prefix of the value density that is
+    evaluated at the level the price chose - not at the level that maximises
+    each point's own average density.
+    """
     P, L = 2048, 3
     o, d = _toy(P, L)
     a = allocate_by_price(_capacity(P, L) // 3, o, d, repair=False)
@@ -199,22 +204,18 @@ def test_price_is_a_threshold():
     d_hat = (d / d.max()).sort(dim=1, descending=True)[0]
     lobe_dens = d_hat / LOBE_FLOATS
 
-    kept = lobe_dens[a.keep_lobes]
-    assert kept.numel() > 0
-    assert float(kept.min()) >= a.beta
-    dropped = lobe_dens[~a.keep_lobes & a.keep_points[:, None]]
-    if dropped.numel():
-        assert float(dropped.max()) <= a.beta
+    # kept lobes are exactly the ones priced above beta, nothing else
+    assert torch.equal(a.keep_lobes,
+                       (lobe_dens >= a.beta) & a.keep_points[:, None])
 
-    # kept lobes are the descending prefix of kept points, nothing else
-    assert torch.equal(a.keep_lobes, (lobe_dens >= a.beta) & a.keep_points[:, None])
-
-    # and a point is kept only if its value pays for its own level at that price
-    padded = torch.cat([torch.zeros(P, 1), d_hat.cumsum(dim=1)], dim=1)
+    # and the headcount is the prefix of the density at that fixed level
     m = (lobe_dens >= a.beta).sum(dim=1)
-    value = o_hat + padded.gather(1, m[:, None]).squeeze(1)
-    assert torch.equal(a.keep_points,
-                       value >= a.beta * (BASE_FLOATS + LOBE_FLOATS * m))
+    cost = BASE_FLOATS + LOBE_FLOATS * m
+    padded = torch.cat([torch.zeros(P, 1), d_hat.cumsum(dim=1)], dim=1)
+    dens = (o_hat + padded.gather(1, m[:, None]).squeeze(1)) / cost
+    kept = a.keep_points
+    if 0 < int(kept.sum()) < P:
+        assert float(dens[kept].min()) >= float(dens[~kept].max())
 
 
 def test_price_no_lobes_available():

@@ -31,11 +31,13 @@ trade-off between points and lobes is resolved by the shared ranking, and the
 density at the cut is reported as ``beta`` (value per float, i.e. the shadow
 price of the constraint).
 
-The bundle ranking keeps a point because its *average* density won, so a rich
-point can crowd out geometry before any lobe is bought.  :func:`allocate_by_price`
-charges every float the same price at the margin instead: point and lobe are
-priced separately, the choice becomes separable, and ``beta`` is then the
-threshold every item was literally compared against.
+The bundle ranking maximises the average density over the level, so it can
+prefer a level-0 point over a level-3 point whose lobes are worth more per
+float.  :func:`allocate_by_price` splits the two decisions: a price ``beta``
+fixes the level of every point (lobes above the price, plus the point when its
+value covers its own cost), and the budget then rations the headcount by value
+density at that level.  ``beta`` is the shadow price of a float, so the level
+is where the byte is actually spent.
 """
 from __future__ import annotations
 
@@ -233,10 +235,13 @@ def allocate_by_price(kappa: int, opacity: Tensor, D: Tensor,
 
     The cost of that choice is non-increasing in ``beta`` (a higher price can
     only shrink the level), so bisection returns the largest price whose cost
-    fits ``F``; the remainder is then spent by :func:`_spend_leftover` on next
-    lobes and extra points.  Unlike the bundle ranking this keeps a point whose
-    opacity alone would fail, whenever its lobes pay for the 14 floats, and no
-    point is kept merely because its averaged bundle density won.
+    fits ``F``.  That price then fixes the level of *every* point and the budget
+    only decides how many points get in: the kept set is the prefix of the
+    value density ``(opacity_hat + sum D_hat) / (14 + 7 m_i)`` evaluated at the
+    price-fixed level.  Separating the two decisions is what stops the level
+    from collapsing to 0 at tight budgets - the average density of a bundle no
+    longer decides whether its lobes are bought, the marginal price does.  The
+    sub-point remainder is spent by :func:`_spend_leftover`.
 
     Args:
         kappa: target payload in float32 parameters (per scene).
@@ -297,11 +302,17 @@ def allocate_by_price(kappa: int, opacity: Tensor, D: Tensor,
             hi = mid
         else:
             lo = mid
+    # Step 3: the price fixes the level menu, the budget fixes the headcount.
     beta = hi
-    keep, m, cost = _choice(beta)
-    sel = keep.nonzero(as_tuple=False).squeeze(1)
+    m = (d >= beta * LOBE_FLOATS).sum(dim=1)                   # (P,)
+    menu_cost = costs[m]                                       # (P,)
+    value = o + padded.gather(1, m[:, None]).squeeze(1)
+    order = (value / menu_cost).argsort(descending=True)
+    cum = menu_cost[order].cumsum(0)
+    n_pts = int((cum <= F).sum().item())
+    sel = order[:n_pts]
     m = m[sel].clone()
-    leftover = F - cost
+    leftover = F - int(menu_cost[sel].sum().item())
 
     # Step 3: mop up the sub-threshold remainder on the grid.
     if repair:
