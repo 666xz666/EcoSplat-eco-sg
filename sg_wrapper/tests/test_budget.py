@@ -236,6 +236,40 @@ def test_price_deterministic():
     assert a1.beta == a2.beta
 
 
+def test_snap_never_exceeds_target():
+    """``F* <= max(kappa, 14)``: the target is a ceiling, not a suggestion."""
+    for kappa in range(1, 400):
+        f = snap_budget(kappa)
+        assert f % GRID == 0
+        assert f <= max(kappa, BASE_FLOATS)
+
+
+def test_snap_rounding_boundary():
+    assert snap_budget(20) == BASE_FLOATS      # 14, not 21
+    assert snap_budget(21) == 21
+    assert snap_budget(27) == 21
+    assert snap_budget(28) == 28
+
+
+def test_zero_scores_spend_nothing():
+    """All-zero scores buy nothing: an empty scene must not fill the payload."""
+    P, L = 256, 3
+    o, d = torch.zeros(P), torch.zeros(P, L)
+    F = _capacity(P, L) // 4
+    for a in (allocate(F, o, d), allocate_by_price(F, o, d)):
+        assert a.n_points == 0 and a.n_lobes == 0
+        assert a.achieved == 0 and a.target == snap_budget(F)
+
+
+def test_capacity_shortfall_never_overspends():
+    """Fewer candidates than the budget: keep everything, spend the capacity."""
+    P, L = 8, 3
+    o, d = _toy(P, L)
+    a = allocate_by_price(10_000, o, d)
+    assert a.n_points == P and a.n_lobes == P * L
+    assert a.achieved == _capacity(P, L) and a.beta == 0.0
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

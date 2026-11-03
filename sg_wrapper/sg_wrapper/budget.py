@@ -83,8 +83,15 @@ def ratio_to_kappa(ratio: float, num_views: int, height: int, width: int,
 
 
 def snap_budget(kappa: int) -> int:
-    """Round a byte budget down/up to the reachable 7-float grid (min one point)."""
-    return max(BASE_FLOATS, int(round(int(kappa) / GRID)) * GRID)
+    """Snap a target payload down to the 7-float grid (min one point).
+
+    The target is an upper bound, so the grid point must never exceed it: a
+    round-to-nearest would give ``F* = 21`` for ``kappa = 20`` and break
+    ``achieved <= kappa``.  Below one point the hard floor of a single
+    Gaussian (14 floats) wins, which is the only case where ``F* > kappa``.
+    """
+    grid = (int(kappa) // GRID) * GRID
+    return max(BASE_FLOATS, grid)
 
 
 def _normalise(x: Tensor) -> Tensor:
@@ -190,15 +197,19 @@ def allocate(kappa: int, opacity: Tensor, D: Tensor,
     best_dens, best_m = dens.max(dim=1)
     best_cost = costs[best_m]
 
-    # Greedy prefix over points ordered by their best bundle density.
+    # Greedy prefix over points ordered by their best bundle density.  Bundles
+    # worth zero are never bought: spending payload on a dead point buys no
+    # quality, so the budget may stay partly unused when candidates run out.
     order = best_dens.argsort(descending=True)
     cum_cost = best_cost[order].cumsum(0)
     n_pts = int((cum_cost <= F).sum().item())
-    n_pts = max(n_pts, 1)                       # F >= 14 guarantees room for one point
+    n_pts = min(n_pts, int((best_dens[order] > 0).sum().item()))
+    if n_pts == 0 and float(best_dens.max().item()) > 0:
+        n_pts = 1                       # F >= 14 guarantees room for one point
     sel = order[:n_pts]
     m = best_m[sel].clone()
     leftover = F - int(costs[m].sum().item())
-    beta = float(best_dens[sel[-1]].item())
+    beta = float(best_dens[sel[-1]].item()) if sel.numel() else 0.0
 
     sel, m, leftover = _spend_leftover(sel, m, leftover, o, d, Lmax, dev)
 
@@ -310,6 +321,7 @@ def allocate_by_price(kappa: int, opacity: Tensor, D: Tensor,
     order = (value / menu_cost).argsort(descending=True)
     cum = menu_cost[order].cumsum(0)
     n_pts = int((cum <= F).sum().item())
+    n_pts = min(n_pts, int((value[order] > 0).sum().item()))
     sel = order[:n_pts]
     m = m[sel].clone()
     leftover = F - int(menu_cost[sel].sum().item())
