@@ -1,20 +1,29 @@
 # @package _global_
-# Stage-1 PGT (pre-training) with the SG-3 color head, trained from scratch.
+# Stage-1 PGT (pre-training) with the SG-3 color head, full-parameter.
 #
-# Everything except the color head follows SPFSplat's official stage-1 recipe
-# (config/experiment/spfsplat/re10k.yaml), which is the checkpoint family
-# EcoSplat finetunes with IGF:
-#   * 2 context views, warm-up curriculum over 200K steps, max distance 150
-#   * batch 12 per optimizer step, 400_001 steps
-#   * lr 1e-4, 2K linear warm-up, cosine to 1e-6, backbone at 0.1x lr
-#   * loss mse + lpips + reproj(0.001, dyntanh, 400_001 steps)
-#   * full-parameter training from the MASt3R initialisation
-# The only deviation is the head: SG-3 (32 channels) instead of SH4 (83), i.e.
-# the representation this branch studies.
+# Recipe = EcoSplat's own 10-view training config (config/experiment/spfsplat/
+# re10k_10view.yaml) with IGF removed and the color head swapped:
+#   * 10 context views, 1 target view, no view-sampling curriculum
+#   * batch 1 per rank x accumulate 4 => effective batch 4
+#   * 400_001 steps, lr 1e-4, 2K linear warm-up, cosine to 1e-6
+#   * backbone at 0.1x lr, mse + lpips + reproj(0.001, dyntanh)
+#   * initialised from pretrained_weights/re10k_10view.ckpt, the same base
+#     checkpoint EcoSplat finetunes; only the first 11 head channels (opacity,
+#     scale, rotation, c0) are aligned, the three SG lobes start from scratch.
+# Deviations from the official file, all deliberate:
+#   1. head SG-3 (32 channels) instead of SH4 (83) — the representation studied
+#   2. train.unfreeze_all: the encoder freezes every parameter at construction
+#      (upstream's second-stage convention), so a full-parameter run has to
+#      release them explicitly; split_backbone_lr makes the 0.1x multiplier real
+#      (upstream packs every trainable parameter into one group, `if True:`)
+#   3. reproj.total_iterations follows max_steps (the official file says
+#      200_001 next to max_steps 400_001, an upstream inconsistency)
+#   4. checkpointing.save_top_k: -1 keeps the whole ladder (40 x ~7.4 GB)
 #
-# Launch (4 GPUs, effective batch 12 = 4 x 3):
-#   CUDA_VISIBLE_DEVICES=4,3,2,6 python -m src.main +experiment=spfsplat/sg/re10k_pgt_sg \
-#       data_loader.train.batch_size=3
+# Launch (4 GPUs, effective batch 4 = 4 x 1, no accumulation):
+#   ./train_pgt_bg.sh start 3,2,4,6
+# Single GPU (exactly Eco's 1 x accumulate 4):
+#   ./train_pgt_bg.sh start 3
 
 defaults:
   - /dataset@_group_.re10k: re10k
@@ -24,8 +33,8 @@ defaults:
   - override /loss: [mse, lpips, reproj]
 
 wandb:
-  name: re10k-pgt-sg3
-  tags: [re10k, 256x256, sg, pgt]
+  name: re10k-pgt-sg3-10v
+  tags: [re10k, 256x256, sg, pgt, 10view]
   project: spfsplat
 
 loss:
@@ -41,11 +50,10 @@ model:
       intrinsics_embed_loc: encoder
       intrinsics_embed_type: token
 
-    # Upstream MASt3R/CroCo weights (top-level `model` dict). sg_wrapper's
-    # stage-1 partial loader only handles Lightning checkpoints, so this file
-    # is loaded by src/main.py instead — that is what a from-scratch stage-1
-    # needs; representation-swap runs keep pointing here at a stage-1 ckpt.
-    pretrained_weights: ./pretrained_weights/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth
+    # Stage-1 Lightning checkpoint: sg_wrapper's partial loader reads the
+    # `encoder.*` keys. `igf` must stay absent — its presence switches the
+    # encoder into the second stage.
+    pretrained_weights: pretrained_weights/re10k_10view.ckpt
 
     sg:
       num_lobes: 3
@@ -54,9 +62,9 @@ dataset:
   re10k:
     make_baseline_1: true
     view_sampler:
-      warm_up_steps: 200_000
+      warm_up_steps: 0
       num_target_views: 1
-      num_context_views: 2
+      num_context_views: 10
       max_distance_between_context_views: 150
 
 optimizer:
@@ -67,11 +75,12 @@ optimizer:
 
 data_loader:
   train:
-    batch_size: 12
+    batch_size: 1
 
 trainer:
   max_steps: 400_001
   val_check_interval: 10000
+  accumulate_grad_batches: 4
 
 checkpointing:
   every_n_train_steps: 10000
@@ -80,8 +89,6 @@ checkpointing:
 
 train:
   training_context: false
-  # The encoder freezes itself at construction; a from-scratch stage-1 has to
-  # release every parameter, and the backbone then trains at 0.1x lr.
   unfreeze_all: true
   split_backbone_lr: true
   freeze_pretrained: false
@@ -89,7 +96,7 @@ train:
   freeze_intrinsic_encoder: false
 
 test:
-  output_path: outputs/test/pgt_sg3
+  output_path: outputs/test/pgt_sg3_10v
   align_pose: false
   compute_scores: true
   save_image: true

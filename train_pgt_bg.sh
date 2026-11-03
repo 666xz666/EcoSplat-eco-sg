@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# train_pgt_bg.sh — 第一阶段 PGT（全参数、2 视角、400K 步）后台启动器
+# train_pgt_bg.sh — 第一阶段 PGT（10 视角、全参数、400K 步）后台启动器
 #
-#   ./train_pgt_bg.sh probe 4              # 50 步探针：看显存/步速，约 5 分钟
-#   ./train_pgt_bg.sh start 4              # 单卡，batch 12
-#   ./train_pgt_bg.sh start 4,3            # 双卡，每卡 batch 6（有效 batch 12）
-#   ./train_pgt_bg.sh start 4,3,2,6        # 四卡，每卡 batch 3
-#   ./train_pgt_bg.sh status               # 是否在跑 + 最近两行进度
-#   ./train_pgt_bg.sh follow               # tail -f
-#   ./train_pgt_bg.sh stop                 # 停整个进程组（含 DDP worker）
+#   ./train_pgt_bg.sh probe 3               # 51 步探针：看显存/步速，约 10 分钟
+#   ./train_pgt_bg.sh start 3               # 单卡，1 x accum 4（与 Eco 完全一致）
+#   ./train_pgt_bg.sh start 3,6             # 双卡，每卡 1 x accum 2
+#   ./train_pgt_bg.sh start 3,6,4,2         # 四卡，每卡 1，不累积
+#   ./train_pgt_bg.sh status                # 是否在跑 + 最近两行进度
+#   ./train_pgt_bg.sh follow                # tail -f
+#   ./train_pgt_bg.sh stop                  # 停整个进程组（含 DDP worker）
 #
-# 有效 batch 固定为 12（EcoSplat 第一阶段配方的 batch_size），所以卡数只能取
-# 12 的约数（1/2/3/4/6），每卡 batch = 12 / 卡数。
-# 环境变量：CONDA_ENV(默认 ecosplat) / CONDA_SH / LOG_DIR / RUN_DIR
+# 有效 batch 固定为 4（每卡 micro-batch 1，靠 accumulate 补到 4），与
+# EcoSplat 的 10 视角配方一致；所以卡数只能取 4 的约数（1/2/4）。
+# 环境变量：CONDA_ENV(默认 ecosplat) / CONDA_SH / LOG_DIR / RUN_DIR / OUT_ROOT
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,7 +22,8 @@ LOG_DIR="${LOG_DIR:-$REPO/logs}"
 OUT_ROOT="${OUT_ROOT:-/data14T/xz/outputs}"
 DATA_ROOT="${DATA_ROOT:-/data14T/xz/data/re10k}"
 EXPERIMENT="spfsplat/sg/re10k_pgt_sg"
-TAG="pgt_sg3"
+TAG="pgt_sg3_10v"
+EFFECTIVE_BATCH=4
 
 mkdir -p "$RUN_DIR" "$LOG_DIR"
 pidfile() { echo "$RUN_DIR/$TAG.pid"; }
@@ -31,16 +32,16 @@ is_running() { local f; f=$(pidfile); [ -f "$f" ] && kill -0 "$(cat "$f" 2>/dev/
 launch() {
     local gpus="${1:?用法: $0 start|probe <gpu_ids> [hydra overrides...]}"; shift
     local mode="$1"; shift
-    local n_gpu batch suffix extra run_dir
+    local n_gpu accum suffix extra run_dir
     n_gpu=$(awk -F',' '{print NF}' <<<"$gpus")
-    if (( 12 % n_gpu != 0 )); then
-        echo "卡数必须是 12 的约数（1/2/3/4/6），收到 $n_gpu 张：$gpus" >&2
+    if (( EFFECTIVE_BATCH % n_gpu != 0 )); then
+        echo "卡数必须是 ${EFFECTIVE_BATCH} 的约数（1/2/4），收到 $n_gpu 张：$gpus" >&2
         exit 2
     fi
-    batch=$(( 12 / n_gpu ))
+    accum=$(( EFFECTIVE_BATCH / n_gpu ))
     suffix=""; extra=""; run_dir="$OUT_ROOT/$TAG"
     if [ "$mode" = "probe" ]; then
-        # 50 步足够读出显存峰值与步速；不落 checkpoint，避免白写一个 7 GB 文件。
+        # 51 步足够读出显存峰值与步速；不落 checkpoint，避免白写一个 7 GB 文件。
         suffix="_probe"; run_dir="$OUT_ROOT/${TAG}_probe"
         extra="trainer.max_steps=51 train.print_log_every_n_steps=1 checkpointing.every_n_train_steps=100000"
     fi
@@ -54,7 +55,7 @@ launch() {
 source '$CONDA_SH'
 conda activate '$CONDA_ENV'
 cd '$REPO'
-echo "[pgt] \$(date '+%F %T') mode=$mode gpus=$gpus batch/rank=$batch effective=$(($batch * $n_gpu))"
+echo "[pgt] \$(date '+%F %T') mode=$mode gpus=$gpus micro=1 accum=$accum effective=$((1 * $n_gpu * $accum))"
 export PYTHONUNBUFFERED=1
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export CUDA_VISIBLE_DEVICES=$gpus
@@ -63,7 +64,8 @@ python -u -m src.main +experiment='$EXPERIMENT' \\
     wandb.mode=offline wandb.name='${TAG}${suffix}' \\
     dataset.re10k.roots=[$DATA_ROOT] \\
     data_loader.train.num_workers=4 \\
-    data_loader.train.batch_size=$batch \\
+    data_loader.train.batch_size=1 \\
+    trainer.accumulate_grad_batches=$accum \\
     hydra.run.dir='$run_dir' \\
     $extra $*
 EOF
@@ -79,7 +81,7 @@ EOF
 
     sleep 10
     if is_running; then
-        echo "[$TAG] started pid=$pid gpus=$gpus batch/rank=$batch effective=$(($batch * $n_gpu))"
+        echo "[$TAG] started pid=$pid gpus=$gpus micro=1 accum=$accum effective=$((1 * n_gpu * accum))"
         echo "  log : $log"
         echo "  查看: $0 follow"
     else
@@ -93,12 +95,12 @@ EOF
 status() {
     if is_running; then
         local pid; pid=$(cat "$(pidfile)")
-        printf "%-8s RUNNING pid=%-8s gpus=%-12s elapsed=%s\n" "$TAG" "$pid" \
+        printf "%-14s RUNNING pid=%-8s gpus=%-12s elapsed=%s\n" "$TAG" "$pid" \
             "$(cat "$RUN_DIR/$TAG.gpu" 2>/dev/null || echo '?')" \
             "$(ps -o etime= -p "$pid" 2>/dev/null | tr -d ' ')"
         tail -n 80 "$LOG_DIR/$TAG.latest.log" 2>/dev/null | grep "train step" | tail -n 2 | sed 's/^/    /'
     else
-        printf "%-8s stopped\n" "$TAG"
+        printf "%-14s stopped\n" "$TAG"
         [ -f "$LOG_DIR/$TAG.latest.log" ] && tail -n 3 "$LOG_DIR/$TAG.latest.log" | sed 's/^/    /'
     fi
 }
