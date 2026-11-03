@@ -5,13 +5,15 @@
 #   ./train_pgt_bg.sh start 3               # 单卡，1 x accum 4（与 Eco 完全一致）
 #   ./train_pgt_bg.sh start 3,6             # 双卡，每卡 1 x accum 2
 #   ./train_pgt_bg.sh start 3,6,4,2         # 四卡，每卡 1，不累积
-#   ./train_pgt_bg.sh status                # 是否在跑 + 最近两行进度
-#   ./train_pgt_bg.sh follow                # tail -f
-#   ./train_pgt_bg.sh stop                  # 停整个进程组（含 DDP worker）
+#   ./train_pgt_bg.sh sync                  # 每小时把新检查点推到对象存储（本地只留 3 个）
+#   ./train_pgt_bg.sh status                # 训练与同步是否在跑 + 最近两行进度
+#   ./train_pgt_bg.sh follow                # tail -f 训练日志
+#   ./train_pgt_bg.sh stop                  # 停训练与同步（整组信号）
 #
 # 有效 batch 固定为 4（每卡 micro-batch 1，靠 accumulate 补到 4），与
 # EcoSplat 的 10 视角配方一致；所以卡数只能取 4 的约数（1/2/4）。
-# 环境变量：CONDA_ENV(默认 ecosplat) / CONDA_SH / LOG_DIR / RUN_DIR / OUT_ROOT
+# 环境变量：CONDA_ENV / CONDA_SH / LOG_DIR / RUN_DIR / OUT_ROOT
+#           SYNC_REMOTE（rclone 目标，如 oss:ckpt/pgt_sg3_10v）/ SYNC_INTERVAL（秒，默认 3600）
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,7 +29,9 @@ EFFECTIVE_BATCH=4
 
 mkdir -p "$RUN_DIR" "$LOG_DIR"
 pidfile() { echo "$RUN_DIR/$TAG.pid"; }
+syncpidfile() { echo "$RUN_DIR/$TAG.sync.pid"; }
 is_running() { local f; f=$(pidfile); [ -f "$f" ] && kill -0 "$(cat "$f" 2>/dev/null)" 2>/dev/null; }
+sync_running() { local f; f=$(syncpidfile); [ -f "$f" ] && kill -0 "$(cat "$f" 2>/dev/null)" 2>/dev/null; }
 
 launch() {
     local gpus="${1:?用法: $0 start|probe <gpu_ids> [hydra overrides...]}"; shift
@@ -92,6 +96,52 @@ EOF
     fi
 }
 
+start_sync() {
+    if [ -z "${SYNC_REMOTE:-}" ]; then
+        echo "先用 SYNC_REMOTE=<rclone 目标> 指定落点，例如：" >&2
+        echo "  SYNC_REMOTE=oss:ckpt/$TAG $0 sync" >&2
+        exit 2
+    fi
+    if ! command -v rclone >/dev/null; then
+        echo "找不到 rclone，先装或用对象存储客户端替代" >&2
+        exit 2
+    fi
+    if sync_running; then
+        echo "[$TAG] sync 已在运行 pid=$(cat "$(syncpidfile)")"; return 0
+    fi
+
+    local ckpt_dir="$OUT_ROOT/$TAG/checkpoints"
+    local hydra_dir="$OUT_ROOT/$TAG/.hydra"
+    local payload="$RUN_DIR/$TAG.sync.sh"
+    local slog="$LOG_DIR/$TAG.sync.log"
+    # 只往上加不删本地：--ignore-existing 让每小时的重跑变成增量，检查点写完就不再碰。
+    cat > "$payload" <<EOF
+#!/usr/bin/env bash
+while :; do
+    echo "[\$(date '+%F %T')] sync $ckpt_dir -> $SYNC_REMOTE"
+    if [ -d '$ckpt_dir' ]; then
+        rclone copy --ignore-existing --transfers 4 --checkers 8 --stats 2m \\
+            '$ckpt_dir' '$SYNC_REMOTE' || echo "[warn] checkpoint copy rc=\$?"
+    fi
+    if [ -d '$hydra_dir' ]; then
+        rclone copy --ignore-existing '$hydra_dir' '$SYNC_REMOTE/.hydra' || true
+    fi
+    sleep ${SYNC_INTERVAL:-3600}
+done
+EOF
+    chmod +x "$payload"
+    setsid nohup bash "$payload" >>"$slog" 2>&1 &
+    echo $! > "$(syncpidfile)"
+    ln -sfn "$slog" "$LOG_DIR/$TAG.sync.latest.log"
+    sleep 2
+    if sync_running; then
+        echo "[$TAG] sync started pid=$(cat "$(syncpidfile)") -> $SYNC_REMOTE, every ${SYNC_INTERVAL:-3600}s"
+        echo "  log : $slog"
+    else
+        echo "[$TAG] sync 启动失败，日志末尾："; tail -n 20 "$slog"; rm -f "$(syncpidfile)"; exit 1
+    fi
+}
+
 status() {
     if is_running; then
         local pid; pid=$(cat "$(pidfile)")
@@ -103,24 +153,44 @@ status() {
         printf "%-14s stopped\n" "$TAG"
         [ -f "$LOG_DIR/$TAG.latest.log" ] && tail -n 3 "$LOG_DIR/$TAG.latest.log" | sed 's/^/    /'
     fi
+    if sync_running; then
+        printf "%-14s RUNNING pid=%s\n" "sync" "$(cat "$(syncpidfile)")"
+        tail -n 2 "$LOG_DIR/$TAG.sync.latest.log" 2>/dev/null | sed 's/^/    /'
+    else
+        printf "%-14s stopped\n" "sync"
+    fi
+    local ckpt_dir="$OUT_ROOT/$TAG/checkpoints"
+    if [ -d "$ckpt_dir" ]; then
+        printf "checkpoints %s 个, %s\n" "$(find "$ckpt_dir" -name '*.ckpt' | wc -l)" \
+            "$(du -sh "$ckpt_dir" 2>/dev/null | cut -f1)"
+    fi
 }
 
 stop() {
-    if ! is_running; then echo "[$TAG] not running"; rm -f "$(pidfile)"; return 0; fi
-    local pid; pid=$(cat "$(pidfile)")
-    # 整组发信号，否则 DDP 的其它 rank 会留在卡上。
-    kill -- -"$pid" 2>/dev/null || kill "$pid" 2>/dev/null
-    for _ in $(seq 1 30); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
-    kill -9 -- -"$pid" 2>/dev/null
-    rm -f "$(pidfile)"
-    echo "[$TAG] stopped"
+    local stopped=0
+    if is_running; then
+        local pid; pid=$(cat "$(pidfile)")
+        # 整组发信号，否则 DDP 的其它 rank 会留在卡上。
+        kill -- -"$pid" 2>/dev/null || kill "$pid" 2>/dev/null
+        for _ in $(seq 1 30); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+        kill -9 -- -"$pid" 2>/dev/null
+        rm -f "$(pidfile)"
+        echo "[$TAG] stopped"; stopped=1
+    fi
+    if sync_running; then
+        kill "$(cat "$(syncpidfile)")" 2>/dev/null
+        rm -f "$(syncpidfile)"
+        echo "[sync] stopped"; stopped=1
+    fi
+    [ "$stopped" = 0 ] && echo "[$TAG] nothing running"
 }
 
 case "${1:-}" in
     start) shift; launch "${1:?用法: $0 start <gpu_ids> [overrides...]}" run ;;
     probe) shift; launch "${1:?用法: $0 probe <gpu_ids> [overrides...]}" probe ;;
+    sync) start_sync ;;
     status) status ;;
     follow) tail -f "$LOG_DIR/$TAG.latest.log" ;;
     stop) stop ;;
-    *) sed -n '2,14p' "$0" >&2; exit 2 ;;
+    *) sed -n '2,16p' "$0" >&2; exit 2 ;;
 esac
