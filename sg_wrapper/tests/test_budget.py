@@ -12,6 +12,7 @@ from sg_wrapper.budget import (
     GRID,
     LOBE_FLOATS,
     allocate,
+    allocate_by_price,
     allocate_two_stage,
     dense_floats,
     ratio_to_kappa,
@@ -124,6 +125,114 @@ def test_deterministic():
     a2 = allocate(_capacity(P, L) // 2, o, d)
     assert torch.equal(a1.keep_points, a2.keep_points)
     assert torch.equal(a1.keep_lobes, a2.keep_lobes)
+
+
+# ---------------------------------------------------------------- price rule
+
+def test_price_exact_hit_within_capacity():
+    """The price rule lands on the same contract: unused <= 13 floats."""
+    P, L = 4096, 3
+    o, d = _toy(P, L)
+    cap = _capacity(P, L)
+    for frac in (0.05, 0.2, 0.4, 0.6, 0.8, 0.95):
+        a = allocate_by_price(int(cap * frac), o, d)
+        assert a.achieved <= a.target
+        assert a.target - a.achieved < BASE_FLOATS
+        assert (a.target - a.achieved) % GRID == 0
+        assert a.achieved == BASE_FLOATS * a.n_points + LOBE_FLOATS * a.n_lobes
+        assert not (a.keep_lobes[~a.keep_points]).any()
+        assert int(a.keep_lobes.sum()) == a.n_lobes
+        assert int(a.keep_points.sum()) == a.n_points
+        assert int(a.keep_lobes.sum(dim=1).max()) <= L
+
+
+def test_price_over_capacity_is_graceful():
+    P, L = 512, 3
+    o, d = _toy(P, L)
+    a = allocate_by_price(_capacity(P, L) * 10, o, d)
+    assert a.achieved <= a.target
+    assert a.n_points == P
+    assert a.n_lobes == P * L
+    assert a.beta == 0.0
+
+
+def test_price_monotone_in_budget():
+    P, L = 2048, 3
+    o, d = _toy(P, L)
+    cap = _capacity(P, L)
+    prev = None
+    for frac in (0.1, 0.3, 0.5, 0.7, 0.9):
+        a = allocate_by_price(int(cap * frac), o, d)
+        if prev is not None:
+            assert a.n_points >= prev.n_points
+            assert a.n_lobes >= prev.n_lobes
+            assert a.achieved >= prev.achieved
+            assert a.beta <= prev.beta
+        prev = a
+
+
+def test_price_zero_lobes_never_bought():
+    """A zero-value lobe sits below every feasible price, so it is never taken."""
+    P, L = 4096, 3
+    o, _ = _toy(P, L)
+    d0 = torch.zeros(P, L)
+    a = allocate_by_price(_capacity(P, L) // 4, o, d0)
+    assert a.n_lobes == 0
+    assert a.n_points == a.target // BASE_FLOATS
+
+
+def test_price_all_value_in_lobes():
+    P, L = 4096, 3
+    o = torch.full((P,), 0.01)
+    d = torch.full((P, L), 1.0)
+    a = allocate_by_price(P * BASE_FLOATS // 8, o, d)
+    assert a.n_lobes > 0
+    assert a.target - a.achieved < BASE_FLOATS
+
+
+def test_price_is_a_threshold():
+    """With repair off, ``beta`` really is the cut every item was tested against."""
+    P, L = 2048, 3
+    o, d = _toy(P, L)
+    a = allocate_by_price(_capacity(P, L) // 3, o, d, repair=False)
+    o_hat = o / o.max()
+    d_hat = (d / d.max()).sort(dim=1, descending=True)[0]
+    lobe_dens = d_hat / LOBE_FLOATS
+
+    kept = lobe_dens[a.keep_lobes]
+    assert kept.numel() > 0
+    assert float(kept.min()) >= a.beta
+    dropped = lobe_dens[~a.keep_lobes & a.keep_points[:, None]]
+    if dropped.numel():
+        assert float(dropped.max()) <= a.beta
+
+    # kept lobes are the descending prefix of kept points, nothing else
+    assert torch.equal(a.keep_lobes, (lobe_dens >= a.beta) & a.keep_points[:, None])
+
+    # and a point is kept only if its value pays for its own level at that price
+    padded = torch.cat([torch.zeros(P, 1), d_hat.cumsum(dim=1)], dim=1)
+    m = (lobe_dens >= a.beta).sum(dim=1)
+    value = o_hat + padded.gather(1, m[:, None]).squeeze(1)
+    assert torch.equal(a.keep_points,
+                       value >= a.beta * (BASE_FLOATS + LOBE_FLOATS * m))
+
+
+def test_price_no_lobes_available():
+    P = 4096
+    o, _ = _toy(P, 3)
+    a = allocate_by_price(1_500, o, torch.zeros(P, 0))
+    assert a.n_lobes == 0 and a.keep_lobes.shape[1] == 0
+    assert a.target - a.achieved < BASE_FLOATS
+
+
+def test_price_deterministic():
+    P, L = 1024, 3
+    o, d = _toy(P, L, seed=7)
+    a1 = allocate_by_price(_capacity(P, L) // 2, o, d)
+    a2 = allocate_by_price(_capacity(P, L) // 2, o, d)
+    assert torch.equal(a1.keep_points, a2.keep_points)
+    assert torch.equal(a1.keep_lobes, a2.keep_lobes)
+    assert a1.beta == a2.beta
 
 
 if __name__ == "__main__":

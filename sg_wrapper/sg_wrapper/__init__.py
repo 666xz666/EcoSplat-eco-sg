@@ -9,6 +9,7 @@ from .budget import (
     Allocation,
     GRID,
     allocate,
+    allocate_by_price,
     allocate_two_stage,
     dense_floats,
     ratio_to_kappa,
