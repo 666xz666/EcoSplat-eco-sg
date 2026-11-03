@@ -1,0 +1,97 @@
+# @package _global_
+# Stage-1 PGT (pre-training) with the SG-3 color head, trained from scratch.
+#
+# Everything except the color head follows SPFSplat's official stage-1 recipe
+# (config/experiment/spfsplat/re10k.yaml), which is the checkpoint family
+# EcoSplat finetunes with IGF:
+#   * 2 context views, warm-up curriculum over 200K steps, max distance 150
+#   * batch 12 per optimizer step, 400_001 steps
+#   * lr 1e-4, 2K linear warm-up, cosine to 1e-6, backbone at 0.1x lr
+#   * loss mse + lpips + reproj(0.001, dyntanh, 400_001 steps)
+#   * full-parameter training from the MASt3R initialisation
+# The only deviation is the head: SG-3 (32 channels) instead of SH4 (83), i.e.
+# the representation this branch studies.
+#
+# Launch (4 GPUs, effective batch 12 = 4 x 3):
+#   CUDA_VISIBLE_DEVICES=4,3,2,6 python -m src.main +experiment=spfsplat/sg/re10k_pgt_sg \
+#       data_loader.train.batch_size=3
+
+defaults:
+  - /dataset@_group_.re10k: re10k
+  - override /model/encoder: spfsplat
+  - override /model/encoder/backbone: croco_multi
+  - override /model/decoder: splatting_cuda
+  - override /loss: [mse, lpips, reproj]
+
+wandb:
+  name: re10k-pgt-sg3
+  tags: [re10k, 256x256, sg, pgt]
+  project: spfsplat
+
+loss:
+  reproj:
+    weight: 0.001
+    mode: "dyntanh"
+    total_iterations: 400_001
+
+model:
+  encoder:
+    backbone:
+      name: croco_multi
+      intrinsics_embed_loc: encoder
+      intrinsics_embed_type: token
+
+    # Upstream MASt3R/CroCo weights (top-level `model` dict). sg_wrapper's
+    # stage-1 partial loader only handles Lightning checkpoints, so this file
+    # is loaded by src/main.py instead — that is what a from-scratch stage-1
+    # needs; representation-swap runs keep pointing here at a stage-1 ckpt.
+    pretrained_weights: ./pretrained_weights/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth
+
+    sg:
+      num_lobes: 3
+
+dataset:
+  re10k:
+    make_baseline_1: true
+    view_sampler:
+      warm_up_steps: 200_000
+      num_target_views: 1
+      num_context_views: 2
+      max_distance_between_context_views: 150
+
+optimizer:
+  lr: 1e-4
+  warm_up_steps: 2000
+  backbone_lr_multiplier: 0.1
+  min_lr_multiplier: 0.01
+
+data_loader:
+  train:
+    batch_size: 12
+
+trainer:
+  max_steps: 400_001
+  val_check_interval: 10000
+
+checkpointing:
+  every_n_train_steps: 10000
+  save_weights_only: false
+  save_top_k: -1
+
+train:
+  training_context: false
+  # The encoder freezes itself at construction; a from-scratch stage-1 has to
+  # release every parameter, and the backbone then trains at 0.1x lr.
+  unfreeze_all: true
+  split_backbone_lr: true
+  freeze_pretrained: false
+  freeze_pose_head: false
+  freeze_intrinsic_encoder: false
+
+test:
+  output_path: outputs/test/pgt_sg3
+  align_pose: false
+  compute_scores: true
+  save_image: true
+  save_video: false
+  save_compare: false

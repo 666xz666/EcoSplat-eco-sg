@@ -57,7 +57,7 @@ from .sh_prune import (
     sh_storage_floats,
     truncate_sh,
 )
-from .stage1_loader import init_encoder_from_stage1
+from .stage1_loader import init_encoder_from_stage1, is_stage1_checkpoint
 
 __all__ = [
     "SGAdapterCfg",
@@ -66,6 +66,7 @@ __all__ = [
     "flatten_sg_gaussians",
     "compute_sg_colors",
     "init_encoder_from_stage1",
+    "is_stage1_checkpoint",
     "C0",
     "BASE_FLOATS",
     "LOBE_FLOATS",

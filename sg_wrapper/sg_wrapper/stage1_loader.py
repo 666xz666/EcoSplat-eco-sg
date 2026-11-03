@@ -39,6 +39,31 @@ def _is_head_final_bias(own: torch.Tensor, ckpt: torch.Tensor) -> bool:
     return own.ndim == 1 and own.shape[0] < ckpt.shape[0]
 
 
+def is_stage1_checkpoint(path: str) -> bool:
+    """判断文件是否为带 encoder 权重的 stage-1 Lightning checkpoint。
+
+    表示替换实验要从 stage-1 热启动，而从零开始的第一阶段（PGT）从上游
+    MASt3R/CroCo 文件初始化，两者都走 model.encoder.pretrained_weights 这个
+    入口，只能靠文件结构区分：stage-1 顶层有 state_dict 且键以 encoder. 开头，
+    上游文件顶层是 model。用 map_location="meta" 只读元数据、不搬张量。
+
+    Args:
+        path: checkpoint 或上游权重文件的路径。
+
+    Returns:
+        True 表示按 stage-1 部分加载处理，False 表示交给 src/main.py 加载。
+    """
+    try:
+        ckpt = torch.load(path, map_location="meta")
+    except Exception:
+        # 结构无法识别时保留历史行为，避免已有实验悄悄失去热启动。
+        return True
+    state_dict = ckpt.get("state_dict") if isinstance(ckpt, dict) else None
+    return isinstance(state_dict, dict) and any(
+        key.startswith("encoder.") for key in state_dict
+    )
+
+
 def init_encoder_from_stage1(
     encoder: torch.nn.Module,
     ckpt_path: str,

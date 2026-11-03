@@ -86,6 +86,12 @@ class TrainCfg:
     # 冻结 intrinsic_encoder（骨干内的相机嵌入）。它可训练时整条 ViT 的
     # 反向图都要保留，显存显著上升；只训参数头的实验不需要它自适应。
     freeze_intrinsic_encoder: bool = False
+    # 第一阶段（PGT）从零训练：编码器构造时把所有参数设成 requires_grad=False
+    # （上游为第二阶段的 IGF 写法服务），从零训练必须显式放开全部参数。
+    unfreeze_all: bool = False
+    # 让 optimizer.backbone_lr_multiplier 生效：骨干走 0.1× 学习率，其余走
+    # 基础学习率。第二阶段保持关闭，because IGF 克隆出来的头不能被降速。
+    split_backbone_lr: bool = False
 
 
 
@@ -147,6 +153,13 @@ class ModelWrapper(LightningModule):
         self.benchmarker = Benchmarker()
 
         self.test_step_outputs = {}
+
+        if getattr(train_cfg, "unfreeze_all", False):
+            # 步骤 1：先把编码器的全冻结状态解开（上游在 __init__ 里统一置 False）。
+            # 步骤 2：下面的 freeze_* 开关再按配方收窄；顺序不能反，否则
+            # freeze_backbone 之类会被这次全放开覆盖。
+            for param in self.parameters():
+                param.requires_grad = True
 
         if train_cfg.freeze_backbone: 
             self.freeze_params(freeze_keywords=['backbone'])
@@ -1005,19 +1018,23 @@ class ModelWrapper(LightningModule):
                     print(f"Freezing: {name}")
 
     def configure_optimizers(self):
+        split_backbone_lr = getattr(self.train_cfg, "split_backbone_lr", False)
         new_params, new_param_names = [], []
         pretrained_params, pretrained_param_names = [], []
         for name, param in self.named_parameters():
             if not param.requires_grad:
                 continue
 
-            # if "gaussian_param_head" in name or "intrinsic_encoder" in name or "pose_head" in name:
-            if True:
-                new_params.append(param)
-                new_param_names.append(name)
-            else:
+            # 步骤 1：第一阶段要让 backbone_lr_multiplier 真正生效，骨干单独
+            # 成组；否则上游的 `if True` 会把所有可训参数都塞进基础学习率组，
+            # 0.1× 这个配置项形同虚设。
+            # 步骤 2：第二阶段（IGF）保持上游行为，克隆出来的头不能降速。
+            if split_backbone_lr and "backbone" in name:
                 pretrained_params.append(param)
                 pretrained_param_names.append(name)
+            else:
+                new_params.append(param)
+                new_param_names.append(name)
 
         param_dicts = [
             {

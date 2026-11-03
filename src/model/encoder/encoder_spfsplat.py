@@ -168,10 +168,15 @@ class EncoderSPFSplat(Encoder[EncoderSPFSplatCfg]):
         # (density, scale, rotation, c0/SH-DC). Which modules actually train
         # is controlled by train.freeze_pretrained / freeze_pose_head.
         if cfg.pretrained_weights and cfg.igf is None:
-            from sg_wrapper import init_encoder_from_stage1
-            init_encoder_from_stage1(self, cfg.pretrained_weights)
-            # Signals src/main.py to skip its own (shape-strict) reload.
-            self._stage1_partial_loaded = True
+            from sg_wrapper import init_encoder_from_stage1, is_stage1_checkpoint
+
+            if is_stage1_checkpoint(cfg.pretrained_weights):
+                init_encoder_from_stage1(self, cfg.pretrained_weights)
+                # Signals src/main.py to skip its own (shape-strict) reload.
+                self._stage1_partial_loaded = True
+            # Otherwise the path holds upstream CroCo/MASt3R weights (top level
+            # `model`), which is the from-scratch stage-1 (PGT) initialisation:
+            # src/main.py loads it, so nothing to do here.
 
     def set_center_head(self, output_mode, head_type, landscape_only, depth_mode, conf_mode):
         self.backbone.depth_mode = depth_mode

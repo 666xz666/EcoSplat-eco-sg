@@ -57,6 +57,8 @@ train:
   freeze_pretrained: false
   freeze_backbone: false
   freeze_pose_head: false
+  unfreeze_all: false
+  split_backbone_lr: false
 
 
 
