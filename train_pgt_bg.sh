@@ -13,6 +13,7 @@
 # 有效 batch 固定为 4（每卡 micro-batch 1，靠 accumulate 补到 4），与
 # EcoSplat 的 10 视角配方一致；所以卡数只能取 4 的约数（1/2/4）。
 # 环境变量：CONDA_ENV / CONDA_SH / LOG_DIR / RUN_DIR / OUT_ROOT
+#           EXPERIMENT（默认 spfsplat/sg/re10k_pgt_sg）/ TAG（默认 pgt_sg3_10v）
 #           SYNC_REMOTE（rclone 目标，如 oss:ckpt/pgt_sg3_10v）/ SYNC_INTERVAL（秒，默认 3600）
 set -uo pipefail
 
@@ -23,8 +24,8 @@ RUN_DIR="${RUN_DIR:-$REPO/.run}"
 LOG_DIR="${LOG_DIR:-$REPO/logs}"
 OUT_ROOT="${OUT_ROOT:-/data14T/xz/outputs}"
 DATA_ROOT="${DATA_ROOT:-/data14T/xz/data/re10k}"
-EXPERIMENT="spfsplat/sg/re10k_pgt_sg"
-TAG="pgt_sg3_10v"
+EXPERIMENT="${EXPERIMENT:-spfsplat/sg/re10k_pgt_sg}"
+TAG="${TAG:-pgt_sg3_10v}"
 EFFECTIVE_BATCH=4
 
 mkdir -p "$RUN_DIR" "$LOG_DIR"
