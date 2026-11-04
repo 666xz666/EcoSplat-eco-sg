@@ -69,9 +69,14 @@ def train(cfg_dict: DictConfig):
     callbacks = []
     if cfg_dict.wandb.mode != "disabled":
         if cfg.checkpointing.load is not None and cfg.checkpointing.resume:
-            print(cfg.checkpointing.load, Path(cfg.checkpointing.load).parent.parent)
-            with open( Path(cfg.checkpointing.load).parent.parent / "wandb_run_id.txt") as f:
-                resume_id = f.read().strip()
+            id_file = Path(cfg.checkpointing.load).parent.parent / "wandb_run_id.txt"
+            # 续训权重常常来自归档目录，那里没有 wandb_run_id.txt。以前这里直接
+            # 读文件，去归档续训会在建 logger 之前就崩；读不到就当作新 run。
+            if id_file.exists():
+                resume_id = id_file.read_text().strip()
+            else:
+                print(cyan(f"No wandb id next to {cfg.checkpointing.load}; logging as a new run."))
+                resume_id = uuid.uuid4().hex
             logger = WandbLogger(
                 project=cfg_dict.wandb.project,
                 mode=cfg_dict.wandb.mode,
