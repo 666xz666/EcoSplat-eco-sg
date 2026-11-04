@@ -58,9 +58,11 @@ trainer:
   accumulate_grad_batches: 4
 
 checkpointing:
-  every_n_train_steps: 10000
+  # 2.77 GB per file; one every ~33 min keeps an overnight crash cheap while the
+  # rolling window still covers the last 20K steps.
+  every_n_train_steps: 1000
   save_weights_only: false
-  save_top_k: 1
+  save_top_k: 20
 
 train:
   training_context: false
