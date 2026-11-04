@@ -22,10 +22,11 @@
 #      info/global_step, mode max), i.e. 22 GB instead of the full 290 GB
 #      ladder; train_pgt_bg.sh sync pushes every checkpoint to object storage
 #      so the history survives off-box, and resume only needs the newest
-#   5. train.grad_checkpoint: the encoder runs one pts3d head and one color head
-#      per view, so the DPT activations dominate memory; recomputing them in
-#      the backward pass is numerically identical and is what makes a 32 GB
-#      V100 viable
+#   5. train.grad_checkpoint: the DPT heads run once per view and the ViT
+#      encoder/decoder keep a full set of block activations for ten views, so
+#      those two dominate memory; recomputing them in the backward pass is
+#      numerically identical (no BatchNorm, dropout 0) and is what makes a
+#      32 GB V100 viable
 #
 # Launch (4 GPUs, effective batch 4 = 4 x 1, no accumulation):
 #   ./train_pgt_bg.sh start 3,2,4,6

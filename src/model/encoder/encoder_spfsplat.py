@@ -182,6 +182,19 @@ class EncoderSPFSplat(Encoder[EncoderSPFSplatCfg]):
             # `model`), which is the from-scratch stage-1 (PGT) initialisation:
             # src/main.py loads it, so nothing to do here.
 
+    def set_grad_checkpoint(self, flag: bool) -> None:
+        """打开或关闭激活重算，覆盖头部与骨干的每个 transformer block。
+
+        Args:
+            flag: 为真时前向不留中间激活，反向前向重算。
+        """
+        # 骨干（ViT 编码器 + 解码器）的激活量随视角数线性增长，是十视角下的大头；
+        # 头部每个视角各跑一次 DPT，量也不小。两者一起开关，口径才一致。
+        self.grad_checkpoint = bool(flag)
+        backbone = getattr(self, "backbone", None)
+        if backbone is not None and hasattr(backbone, "grad_checkpoint"):
+            backbone.grad_checkpoint = bool(flag)
+
     def set_center_head(self, output_mode, head_type, landscape_only, depth_mode, conf_mode):
         self.backbone.depth_mode = depth_mode
         self.backbone.conf_mode = conf_mode

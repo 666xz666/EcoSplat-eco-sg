@@ -5,6 +5,7 @@ from typing import Literal, Optional
 import torch
 from einops import rearrange
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 
 from .croco.blocks import DecoderBlock
 from .croco.croco import CroCoNet
@@ -81,6 +82,11 @@ class AsymmetricCroCoMulti(CroCoNet):
 
         super().__init__(**croco_params[cfg.model])
 
+        # 激活重算开关：编码器与解码器的每个 block 都保存一份中间激活给反向用，
+        # 视角一多就是显存主项。打开后前向不留激活，反向前向重算。
+        # 由 ModelWrapper 按 train.grad_checkpoint 注入，默认关闭。
+        self.grad_checkpoint = False
+
         if cfg.asymmetry_decoder:
             self.dec_blocks2 = deepcopy(self.dec_blocks)  # This is used in DUSt3R and MASt3R
 
@@ -135,6 +141,42 @@ class AsymmetricCroCoMulti(CroCoNet):
         """ No prediction head """
         return
 
+    def _run_enc_block(self, blk, x, xpos):
+        """跑一个 ViT 编码 block，按开关决定是否在反向前向重算。
+
+        Args:
+            blk: 单个编码 block，前向签名 ``(x, xpos) -> x``。
+            x (Tensor): 形状 ``(B, L, C)`` 的 patch 特征。
+            xpos (Tensor): 形状 ``(B, L, 2)`` 的 patch 坐标。
+
+        Returns:
+            Tensor: 形状 ``(B, L, C)``，与不重算时逐位相同。
+        """
+        # 重算省下的是 block 内 attention 的中间激活，代价是反向前向多跑一遍。
+        if self.grad_checkpoint and self.training and torch.is_grad_enabled():
+            return checkpoint(blk, x, xpos, use_reentrant=False)
+        return blk(x, xpos)
+
+    def _run_dec_block(self, blk, x, y, xpos, ypos):
+        """跑一个 ViT 解码 block，只返回更新后的查询特征。
+
+        Args:
+            blk: 单个解码 block，前向签名 ``(x, y, xpos, ypos) -> (x, y)``。
+            x (Tensor): 形状 ``(B, L, C)`` 的查询特征。
+            y (Tensor): 形状 ``(B, M, C)`` 的上下文特征，未加 mask 时原样返回。
+            xpos (Tensor): 形状 ``(B, L, 2)`` 的查询坐标。
+            ypos (Tensor): 形状 ``(B, M, 2)`` 的上下文坐标。
+
+        Returns:
+            Tensor: 形状 ``(B, L, C)``，与不重算时逐位相同。
+        """
+        # 第二个返回值就是入参 y 本身（跨视角信息已经融进 x），丢掉不改变计算图。
+        if self.grad_checkpoint and self.training and torch.is_grad_enabled():
+            out = checkpoint(blk, x, y, xpos, ypos, use_reentrant=False)
+        else:
+            out = blk(x, y, xpos, ypos)
+        return out[0]
+
     def _encode_image(self, image, true_shape, intrinsics_embed=None, intrinsics_pos_embed=None, pose_embedding=None):
         # embed the image into patches  (x has size B x Npatches x C)
         x, pos = self.patch_embed(image, true_shape=true_shape) # (bv, 256, 1024), (bv, 256, 2)
@@ -158,7 +200,7 @@ class AsymmetricCroCoMulti(CroCoNet):
 
         # now apply the transformer encoder and normalization
         for blk in self.enc_blocks:
-            x = blk(x, pos)
+            x = self._run_enc_block(blk, x, pos)
 
         x = self.enc_norm(x)
         return x, pos, P 
@@ -188,10 +230,10 @@ class AsymmetricCroCoMulti(CroCoNet):
             feat_current = final_output[-1]
             feat_current_ctx = generate_ctx_views(feat_current)
             # img1 side
-            f1, _ = blk1(feat_current[:, 0].contiguous(), feat_current_ctx[:, 0].contiguous(), pose[:, 0].contiguous(), pos_ctx[:, 0].contiguous())
+            f1 = self._run_dec_block(blk1, feat_current[:, 0].contiguous(), feat_current_ctx[:, 0].contiguous(), pose[:, 0].contiguous(), pos_ctx[:, 0].contiguous())
             f1 = f1.unsqueeze(1)
             # img2 side
-            f2, _ = blk2(rearrange(feat_current[:, 1:], "b v l c -> (b v) l c"),
+            f2 = self._run_dec_block(blk2, rearrange(feat_current[:, 1:], "b v l c -> (b v) l c"),
                          rearrange(feat_current_ctx[:, 1:], "b v l c -> (b v) l c"),
                          rearrange(pose[:, 1:].contiguous(), "b v l c -> (b v) l c"),
                          rearrange(pos_ctx[:, 1:].contiguous(), "b v l c -> (b v) l c"))

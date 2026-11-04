@@ -141,8 +141,8 @@ class ModelWrapper(LightningModule):
 
         # Set up the model.
         self.encoder = encoder
-        # 编码器的头在构造时拿不到 train 段配置，这里把显存开关注入进去。
-        self.encoder.grad_checkpoint = bool(getattr(train_cfg, "grad_checkpoint", False))
+        # 编码器的头与骨干在构造时都拿不到 train 段配置，这里把显存开关注入进去。
+        self.encoder.set_grad_checkpoint(bool(getattr(train_cfg, "grad_checkpoint", False)))
         self.encoder_visualizer = encoder_visualizer
         self.decoder = decoder
         self.data_shim = get_data_shim(self.encoder)
@@ -342,7 +342,8 @@ class ModelWrapper(LightningModule):
                 f"loss = {total_loss:.6f}; "
                 f"psnr = {psnr.mean().item():.6f}; "
                 f"protect_rate = {protect_rate}; "
-                f"#GS = {gaussians.means.shape[1]}"
+                f"#GS = {gaussians.means.shape[1]}; "
+                f"peak_mem = {torch.cuda.max_memory_allocated() / 2**30:.2f} GiB"
             )
         self.log("info/global_step", self.global_step)  # hack for ckpt monitor
 
