@@ -59,7 +59,7 @@ def parse_log(path, max_step=None):
                 }
             )
     if not rows:
-        raise SystemExit(f"no train lines found in {path}")
+        return None
     keys = rows[0].keys()
     return {k: np.array([r[k] for r in rows], dtype=float) for k in keys}
 
@@ -102,7 +102,7 @@ def rolling(x, w, how="mean"):
     return out[: len(x)]
 
 
-def plot(agg, out_png, smooth):
+def plot(agg, out_png, smooth, overlays=()):
     """Draw loss, PSNR and guard panels; the third panel is skipped when empty."""
     fig, axes = plt.subplots(3, 1, figsize=(11, 9), sharex=True, gridspec_kw={"height_ratios": [1, 1, 0.6]})
     step = agg["step"]
@@ -110,6 +110,9 @@ def plot(agg, out_png, smooth):
     ax = axes[0]
     ax.plot(step, agg["loss"], color="tab:blue", lw=0.5, alpha=0.18)
     ax.plot(step, rolling(agg["loss"], smooth), color="tab:blue", lw=1.8, label=f"mean({smooth})")
+    for o in overlays:
+        ax.plot(o["agg"]["step"], rolling(o["agg"]["loss"], smooth),
+                color=o["color"], lw=1.2, ls="--", label=o["label"])
     ax.set_yscale("log")
     ax.set_ylabel("loss (mse + 0.05*lpips + 0.001*reproj)")
     ax.grid(alpha=0.3, which="both")
@@ -118,14 +121,20 @@ def plot(agg, out_png, smooth):
     ax = axes[1]
     ax.plot(step, agg["psnr"], color="tab:green", lw=0.5, alpha=0.18)
     ax.plot(step, rolling(agg["psnr"], smooth, "median"), color="tab:green", lw=1.8, label=f"median({smooth})")
+    for o in overlays:
+        ax.plot(o["agg"]["step"], rolling(o["agg"]["psnr"], smooth, "median"),
+                color=o["color"], lw=1.2, ls="--", label=o["label"])
     ax.set_ylabel("PSNR (dB)")
     ax.grid(alpha=0.3)
     ax.legend(loc="lower right", fontsize=8)
 
     ax = axes[2]
     if np.isfinite(agg["grad_norm"]).any():
-        ax.plot(step, agg["grad_norm"], color="tab:orange", lw=0.5, alpha=0.25)
-        ax.plot(step, rolling(agg["grad_norm"], smooth), color="tab:orange", lw=1.6, label="grad_norm")
+        gn = agg["grad_norm"]
+        ax.plot(step, gn, color="tab:orange", lw=0.5, alpha=0.25)
+        ax.plot(step, rolling(gn, smooth), color="tab:orange", lw=1.6, label="grad_norm")
+        top = float(np.nanpercentile(gn, 98)) * 1.6
+        ax.set_ylim(0, max(top, 1.0))
         ax.set_ylabel("grad norm")
         ax.grid(alpha=0.3)
         ax.legend(loc="upper right", fontsize=8)
@@ -139,7 +148,10 @@ def plot(agg, out_png, smooth):
     ax.set_xlabel("optimizer step")
 
     n = len(step)
-    fig.suptitle(f"PGT stage-1 (SG-3, 10 views, full parameters) — {n} steps, {step[-1]} logged", fontsize=11)
+    fig.suptitle(
+        f"PGT stage-1 (SG-3, 10 views, full parameters) — {step[-1] if n else 0} steps, "
+        f"{n} logged points (every 10 steps)"
+    )
     fig.tight_layout()
     out_png.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_png, dpi=140)
@@ -152,12 +164,35 @@ def main():
     ap.add_argument("--out", default="figs/pgt_curves/curve.png")
     ap.add_argument("--smooth", type=int, default=25)
     ap.add_argument("--max-step", type=int, default=None)
+    ap.add_argument(
+        "--overlay",
+        action="append",
+        default=[],
+        metavar="PATH:LABEL",
+        help="extra log drawn dashed on the loss/PSNR panels, clipped to the main run's steps",
+    )
     args = ap.parse_args()
 
     raw = parse_log(args.log, args.max_step)
+    if raw is None:
+        raise SystemExit(f"no train lines found in {args.log}")
     agg = aggregate(raw)
+    last = float(agg["step"][-1])
+
+    overlays = []
+    palette = ["tab:gray", "tab:purple", "tab:brown"]
+    for i, spec in enumerate(args.overlay):
+        path, _, label = spec.rpartition(":")
+        if not path:  # no label given
+            path, label = spec, Path(spec).stem
+        ov_raw = parse_log(path, int(last))
+        if ov_raw is None:
+            print(f"[skip] {path} has no steps <= {int(last)}", flush=True)
+            continue
+        overlays.append({"agg": aggregate(ov_raw), "label": label, "color": palette[i % len(palette)]})
+
     out_png = Path(args.out)
-    plot(agg, out_png, args.smooth)
+    plot(agg, out_png, args.smooth, overlays)
     out_csv = out_png.with_suffix(".csv")
     np.savetxt(
         out_csv,
@@ -184,9 +219,17 @@ def main():
         "skipped_total": int(np.nanmax(agg["skipped"])) if np.isfinite(agg["skipped"]).any() else None,
         "peak_mem_gib": round(float(np.nanmax(agg["peak_mem"])), 2) if np.isfinite(agg["peak_mem"]).any() else None,
         "sec_per_step": round(float(rate), 2),
-        "png": str(out_png),
-        "csv": str(out_csv),
     }
+    for o in overlays:
+        ov, ov_step = o["agg"], o["agg"]["step"]
+        win = ov_step > min(last, ov_step[-1]) - 200
+        summary[f"overlay[{o['label']}]"] = {
+            "steps": int(ov_step[-1]),
+            "psnr_median_last200": round(float(np.nanmedian(ov["psnr"][win])), 2),
+            "sec_per_step": round(float((ov["sec"][-1] - ov["sec"][0]) / max(1, ov_step[-1] - ov_step[0])), 2),
+        }
+    summary["png"] = str(out_png)
+    summary["csv"] = str(out_csv)
     print(json.dumps(summary, ensure_ascii=False))
 
 
