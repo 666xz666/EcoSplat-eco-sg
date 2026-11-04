@@ -4,6 +4,7 @@ from typing import Any, Literal, Optional
 
 import torch
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 from einops import rearrange
 from jaxtyping import Float
 from torch import Tensor, nn
@@ -106,6 +107,9 @@ class EncoderSPFSplat(Encoder[EncoderSPFSplatCfg]):
         self.raw_gs_dim = 1 + self.gaussian_adapter.d_in  # 1 for opacity
 
         self.gs_params_head_type = cfg.gs_params_head_type
+        # 显存取舍：一次前向要为每个视角各跑一个 pts3d 头和一个颜色头，DPT 的
+        # 中间激活是显存主项。开关由 ModelWrapper 按 train.grad_checkpoint 注入。
+        self.grad_checkpoint = False
        
         self.set_center_head(output_mode='pts3d', head_type='dpt', landscape_only=True,
                             depth_mode=('exp', -inf, inf), conf_mode=None,)
@@ -230,11 +234,30 @@ class EncoderSPFSplat(Encoder[EncoderSPFSplatCfg]):
         # Map the probability density to an opacity.
         return 0.5 * (1 - (1 - pdf) ** exponent + pdf ** (1 / exponent))
 
+    def _head_forward(self, head, tokens, img_info, ray_embedding=None):
+        """Run one DPT head, optionally recomputing it during backward.
+
+        Args:
+            head: DPT head module, or the plain function returned by
+                transpose_to_landscape.
+            tokens: four token tensors of shape (B, N, C).
+            img_info: second positional argument of the head, either (H, W) or
+                the true_shape tensor of shape (B, 2).
+            ray_embedding: third positional argument, kept for signature parity
+                with the existing call sites.
+
+        Returns:
+            Tensor of shape (B, C_out, H, W).
+        """
+        # 步骤 1：训练期且开关打开时，把 DPT 的中间激活换成反向重算，省显存；
+        # 验证/推理没有反向图，直接前向即可，没必要付重算的时间。
+        if self.grad_checkpoint and torch.is_grad_enabled():
+            return checkpoint(head, tokens, img_info, ray_embedding, use_reentrant=False)
+        return head(tokens, img_info, ray_embedding)
+
     def _downstream_head(self, head_num, decout, img_shape, ray_embedding=None):
-        B, S, D = decout[-1].shape
-        # img_shape = tuple(map(int, img_shape))
         head = getattr(self, f'head{head_num}')
-        return head(decout, img_shape, ray_embedding=ray_embedding)
+        return self._head_forward(head, decout, img_shape, ray_embedding)
     
     
 
@@ -347,7 +370,7 @@ class EncoderSPFSplat(Encoder[EncoderSPFSplatCfg]):
 
             # Gaussian parameter head (context only)
             if 'dpt' in self.gs_params_head_type:
-                GS_res1 = self.gaussian_param_head([tok[:, 0].float() for tok in dec_feat], images[:, 0, :3], shape[0, 0].cpu().tolist())
+                GS_res1 = self._head_forward(self.gaussian_param_head, [tok[:, 0].float() for tok in dec_feat], images[:, 0, :3], shape[0, 0].cpu().tolist())
                 GS_res1 = rearrange(GS_res1, "b d h w -> b (h w) d")
                 all_other_params.append(GS_res1)
                 if igf_active:
@@ -357,7 +380,7 @@ class EncoderSPFSplat(Encoder[EncoderSPFSplatCfg]):
                     )
                     merged_other_params.append(rearrange(GS_res1_m, "b d h w -> b (h w) d"))
                 for i in range(1, v_cxt):
-                    GS_res2 = self.gaussian_param_head2([tok[:, i].float() for tok in dec_feat], images[:, i, :3], shape[0, i].cpu().tolist())
+                    GS_res2 = self._head_forward(self.gaussian_param_head2, [tok[:, i].float() for tok in dec_feat], images[:, i, :3], shape[0, i].cpu().tolist())
                     GS_res2 = rearrange(GS_res2, "b d h w -> b (h w) d")
                     all_other_params.append(GS_res2)
                     if igf_active:

@@ -92,6 +92,9 @@ class TrainCfg:
     # 让 optimizer.backbone_lr_multiplier 生效：骨干走 0.1× 学习率，其余走
     # 基础学习率。第二阶段保持关闭，because IGF 克隆出来的头不能被降速。
     split_backbone_lr: bool = False
+    # 梯度检查点：编码器每个视角要跑两个 DPT 头，激活是显存主项。打开后
+    # 反向重算，数值不变，换更小的显存占用和更慢的步速。
+    grad_checkpoint: bool = False
 
 
 
@@ -138,6 +141,8 @@ class ModelWrapper(LightningModule):
 
         # Set up the model.
         self.encoder = encoder
+        # 编码器的头在构造时拿不到 train 段配置，这里把显存开关注入进去。
+        self.encoder.grad_checkpoint = bool(getattr(train_cfg, "grad_checkpoint", False))
         self.encoder_visualizer = encoder_visualizer
         self.decoder = decoder
         self.data_shim = get_data_shim(self.encoder)

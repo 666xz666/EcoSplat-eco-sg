@@ -22,6 +22,10 @@
 #      info/global_step, mode max), i.e. 22 GB instead of the full 290 GB
 #      ladder; train_pgt_bg.sh sync pushes every checkpoint to object storage
 #      so the history survives off-box, and resume only needs the newest
+#   5. train.grad_checkpoint: the encoder runs one pts3d head and one color head
+#      per view, so the DPT activations dominate memory; recomputing them in
+#      the backward pass is numerically identical and is what makes a 32 GB
+#      V100 viable
 #
 # Launch (4 GPUs, effective batch 4 = 4 x 1, no accumulation):
 #   ./train_pgt_bg.sh start 3,2,4,6
@@ -94,6 +98,9 @@ train:
   training_context: false
   unfreeze_all: true
   split_backbone_lr: true
+  # 10 views x 2 DPT heads per step, full backbone: measured 31.7 GiB peak
+  # without checkpointing, so the heads are recomputed in the backward pass.
+  grad_checkpoint: true
   freeze_pretrained: false
   freeze_pose_head: false
   freeze_intrinsic_encoder: false
