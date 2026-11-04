@@ -51,7 +51,10 @@ launch() {
         extra="trainer.max_steps=51 train.print_log_every_n_steps=1 checkpointing.every_n_train_steps=100000"
     fi
 
-    local ts log payload
+    local ts log payload tail_args="" all_extra
+    all_extra="$(echo "$extra $*" | tr -s ' ' | sed 's/^ *//;s/ *$//')"
+    # 额外的 hydra overrides 只有真的有时才接在最后一行，否则会留下一个孤立的续行符。
+    if [ -n "$all_extra" ]; then tail_args=$' \\\n    '"$all_extra"; fi
     ts=$(date +%Y%m%d_%H%M%S)
     log="$LOG_DIR/${TAG}${suffix}_${ts}.log"
     payload="$RUN_DIR/${TAG}${suffix}.cmd.sh"
@@ -71,10 +74,16 @@ python -u -m src.main +experiment='$EXPERIMENT' \\
     data_loader.train.num_workers=4 \\
     data_loader.train.batch_size=1 \\
     trainer.accumulate_grad_batches=$accum \\
-    hydra.run.dir='$run_dir' \\
-    $extra $*
+    hydra.run.dir='$run_dir'$tail_args
 EOF
     chmod +x "$payload"
+
+    # DRY_RUN=1 只生成命令、不启动，用来核对 overrides 是否真的透传进去了。
+    if [ "${DRY_RUN:-0}" = "1" ]; then
+        echo "payload: $payload"
+        sed -n '1,40p' "$payload"
+        return 0
+    fi
 
     # 每行前面加时间戳，日志里就能直接算出 s/step（步速估计要用）。
     setsid nohup bash -c "bash '$payload' 2>&1 | awk '{ print strftime(\"%F %T\"), \$0; fflush() }'" \
@@ -187,8 +196,8 @@ stop() {
 }
 
 case "${1:-}" in
-    start) shift; launch "${1:?用法: $0 start <gpu_ids> [overrides...]}" run ;;
-    probe) shift; launch "${1:?用法: $0 probe <gpu_ids> [overrides...]}" probe ;;
+    start) shift; launch "${1:?用法: $0 start <gpu_ids> [overrides...]}" run "${@:2}" ;;
+    probe) shift; launch "${1:?用法: $0 probe <gpu_ids> [overrides...]}" probe "${@:2}" ;;
     sync) start_sync ;;
     status) status ;;
     follow) tail -f "$LOG_DIR/$TAG.latest.log" ;;
