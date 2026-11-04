@@ -18,10 +18,13 @@
 #      (upstream packs every trainable parameter into one group, `if True:`)
 #   3. reproj.total_iterations follows max_steps (the official file says
 #      200_001 next to max_steps 400_001, an upstream inconsistency)
-#   4. checkpointing.save_top_k: 3 keeps the three newest (monitor is
-#      info/global_step, mode max), i.e. 22 GB instead of the full 290 GB
-#      ladder; train_pgt_bg.sh sync pushes every checkpoint to object storage
-#      so the history survives off-box, and resume only needs the newest
+#   4. checkpointing: every 5_000 steps, keep the eight newest (monitor is
+#      info/global_step, mode max), i.e. a 40K-step window at ~61 GB instead of
+#      the full 600 GB ladder; train_pgt_bg.sh sync pushes every checkpoint to
+#      object storage so the history survives off-box, and resume only needs the
+#      newest. 5K spacing is what the low-budget sweep needs: the base model
+#      keeps changing well past 20K steps, so the R-D curve has to be sampled
+#      inside the run rather than at one endpoint.
 #   5. train.grad_checkpoint: the DPT heads run once per view and the ViT
 #      encoder/decoder keep a full set of block activations for ten views, so
 #      those two dominate memory; recomputing them in the backward pass is
@@ -99,9 +102,9 @@ trainer:
   accumulate_grad_batches: 4
 
 checkpointing:
-  every_n_train_steps: 10000
+  every_n_train_steps: 5000
   save_weights_only: false
-  save_top_k: 3
+  save_top_k: 8
 
 train:
   training_context: false
