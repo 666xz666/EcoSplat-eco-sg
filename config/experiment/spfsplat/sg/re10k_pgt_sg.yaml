@@ -111,8 +111,10 @@ train:
   unfreeze_all: true
   split_backbone_lr: true
   # 10 views x 2 DPT heads per step, full backbone: measured 31.7 GiB peak
-  # without checkpointing, so the heads are recomputed in the backward pass.
-  grad_checkpoint: true
+  # without checkpointing. The recompute path costs ~25-35% per step, so it is
+  # off by default; turn it on only when a 24-32 GB card has to host the
+  # full-parameter recipe.
+  grad_checkpoint: false
   max_grad_norm: 50.0
   skip_large_grad: true
   freeze_pretrained: false
