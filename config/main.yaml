@@ -60,6 +60,10 @@ train:
   unfreeze_all: false
   split_backbone_lr: false
   grad_checkpoint: false
+  # 梯度异常守卫（上游写死在 optimizer_step 里，阈值为逐元素 5）：阈值可配，
+  # 越限时默认丢整步。十视角下单步像素量是两视角的 5 倍，早期梯度同比放大。
+  max_grad_norm: 5.0
+  skip_large_grad: true
 
 
 

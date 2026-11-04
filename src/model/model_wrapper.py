@@ -95,6 +95,11 @@ class TrainCfg:
     # 梯度检查点：编码器每个视角要跑两个 DPT 头，激活是显存主项。打开后
     # 反向重算，数值不变，换更小的显存占用和更慢的步速。
     grad_checkpoint: bool = False
+    # 逐元素梯度绝对值超过该阈值的张量视为异常。上游写死 5，并按首个越限张量
+    # 直接丢掉整步；十视角下单步像素量是两视角的 5 倍，输出卷积的梯度同比放大，
+    # 因此阈值与「是否丢步」都提到配置里，默认值与上游一致。
+    max_grad_norm: float = 5.0
+    skip_large_grad: bool = True
 
 
 
@@ -138,6 +143,9 @@ class ModelWrapper(LightningModule):
         self.test_cfg = test_cfg
         self.train_cfg = train_cfg
         self.step_tracker = step_tracker
+        # 丢步与梯度范数只用于诊断：训练是否在真的更新参数，看这两个数最快。
+        self.skipped_updates = 0
+        self.last_grad_norm = 0.0
 
         # Set up the model.
         self.encoder = encoder
@@ -343,6 +351,8 @@ class ModelWrapper(LightningModule):
                 f"psnr = {psnr.mean().item():.6f}; "
                 f"protect_rate = {protect_rate}; "
                 f"#GS = {gaussians.means.shape[1]}; "
+                f"grad_norm = {self.last_grad_norm:.3f}; "
+                f"skipped = {self.skipped_updates}; "
                 f"peak_mem = {torch.cuda.max_memory_allocated() / 2**30:.2f} GiB"
             )
         self.log("info/global_step", self.global_step)  # hack for ckpt monitor
@@ -1079,12 +1089,13 @@ class ModelWrapper(LightningModule):
         optimizer_closure()
 
         nan_detected = False
-        large_detected = False
-        
-        max_grad_norm = 5  # Define the maximum norm threshold
-        max_grad_value = 0  
+        large_params = []
+        max_grad_value = 0.0
+        # 阈值与「是否因幅值丢步」都可配置：十视角下单步的像素量是两视角的 5 倍，
+        # 1x1 输出卷积的逐元素梯度同比放大，硬编码的 5 会把整步丢掉的概率推到 80% 以上。
+        max_grad_norm = float(getattr(self.train_cfg, "max_grad_norm", 5.0))
+        skip_large_grad = bool(getattr(self.train_cfg, "skip_large_grad", True))
 
-        # Check for NaN gradients
         for name, param in self.named_parameters():
 
             if param.grad is not None:
@@ -1094,23 +1105,27 @@ class ModelWrapper(LightningModule):
                     nan_detected = True
                     break
 
+                # 不 break：一次扫完才能知道越限的规模与分布，扫描成本约 20 ms/步
                 param_max_grad = param.grad.abs().max().item()
                 if param_max_grad > max_grad_value:
                     max_grad_value = param_max_grad
+                if param_max_grad > max_grad_norm:
+                    large_params.append(f"{name}={param_max_grad:.2e}")
 
-                if param.grad.abs().max() > max_grad_norm:  
-                    self.log(f"large_gradient_detected in {name}", param.grad.abs().max().item(), on_step=True, on_epoch=False)
-                    print(f"large gradient in {name}")
-                    large_detected = True
-                    break
-        
         self.log("max_gradient", max_grad_value, on_step=True, on_epoch=False)
+        self.log("num_params_over_grad_limit", len(large_params), on_step=True, on_epoch=False)
+        if large_params and self.global_rank == 0:
+            print(f"grad above {max_grad_norm:g} in {len(large_params)} tensors: " + ", ".join(large_params[:6]))
 
-        if nan_detected or large_detected:
+        if nan_detected or (skip_large_grad and large_params):
+            self.skipped_updates += 1
+            self.log("skipped_updates", float(self.skipped_updates), on_step=True, on_epoch=False)
             optimizer.zero_grad()  # Clear gradients if skipping the step
         else:
             # Clip gradients to prevent exploding gradients
-            torch.nn.utils.clip_grad_norm_(self.parameters(), 0.5)
+            total_norm = torch.nn.utils.clip_grad_norm_(self.parameters(), 0.5)
+            self.last_grad_norm = float(total_norm)
+            self.log("grad_norm", total_norm, on_step=True, on_epoch=False)
             optimizer.step()
             optimizer.zero_grad()
 

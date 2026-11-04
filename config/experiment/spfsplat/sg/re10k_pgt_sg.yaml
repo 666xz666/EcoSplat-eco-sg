@@ -27,6 +27,14 @@
 #      those two dominate memory; recomputing them in the backward pass is
 #      numerically identical (no BatchNorm, dropout 0) and is what makes a
 #      32 GB V100 viable
+#   6. train.max_grad_norm: 50 instead of the hardcoded 5 in optimizer_step.
+#      That guard skips the whole update when one gradient element exceeds the
+#      threshold, and the elements that trip it are the 1x1 output convolutions
+#      of the DPT heads, whose per-element gradient grows with the number of
+#      pixels in a step — ten views instead of the two this constant was
+#      written for. At 5 the first ~40 steps lose ~85% of their updates; the
+#      remaining guard still trips on real explosions (>= 50), and the
+#      clip-to-0.5 that follows handles everything below it.
 #
 # Launch (4 GPUs, effective batch 4 = 4 x 1, no accumulation):
 #   ./train_pgt_bg.sh start 3,2,4,6
@@ -102,6 +110,8 @@ train:
   # 10 views x 2 DPT heads per step, full backbone: measured 31.7 GiB peak
   # without checkpointing, so the heads are recomputed in the backward pass.
   grad_checkpoint: true
+  max_grad_norm: 50.0
+  skip_large_grad: true
   freeze_pretrained: false
   freeze_pose_head: false
   freeze_intrinsic_encoder: false
