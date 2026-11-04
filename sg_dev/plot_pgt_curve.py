@@ -102,7 +102,7 @@ def rolling(x, w, how="mean"):
     return out[: len(x)]
 
 
-def plot(agg, out_png, smooth, overlays=()):
+def plot(agg, out_png, smooth, overlays=(), title=None, xmin=None):
     """Draw loss, PSNR and guard panels; the third panel is skipped when empty."""
     fig, axes = plt.subplots(3, 1, figsize=(11, 9), sharex=True, gridspec_kw={"height_ratios": [1, 1, 0.6]})
     step = agg["step"]
@@ -146,10 +146,15 @@ def plot(agg, out_png, smooth, overlays=()):
     else:
         ax.axis("off")
     ax.set_xlabel("optimizer step")
+    if xmin is not None:
+        for a in fig.axes:
+            if a.get_xlabel() == "optimizer step" or a.get_xlabel() == "":
+                a.set_xlim(left=xmin)
 
     n = len(step)
     fig.suptitle(
-        f"PGT stage-1 (SG-3, 10 views, full parameters) — {step[-1] if n else 0} steps, "
+        title
+        or f"PGT stage-1 (SG-3, 10 views) — {step[-1] if n else 0} steps, "
         f"{n} logged points (every 10 steps)"
     )
     fig.tight_layout()
@@ -164,6 +169,8 @@ def main():
     ap.add_argument("--out", default="figs/pgt_curves/curve.png")
     ap.add_argument("--smooth", type=int, default=25)
     ap.add_argument("--max-step", type=int, default=None)
+    ap.add_argument("--title", default=None, help="figure title; defaults to a generic one")
+    ap.add_argument("--xmin", type=float, default=None, help="left limit of the step axis")
     ap.add_argument(
         "--overlay",
         action="append",
@@ -192,7 +199,7 @@ def main():
         overlays.append({"agg": aggregate(ov_raw), "label": label, "color": palette[i % len(palette)]})
 
     out_png = Path(args.out)
-    plot(agg, out_png, args.smooth, overlays)
+    plot(agg, out_png, args.smooth, overlays, args.title, args.xmin)
     out_csv = out_png.with_suffix(".csv")
     np.savetxt(
         out_csv,
