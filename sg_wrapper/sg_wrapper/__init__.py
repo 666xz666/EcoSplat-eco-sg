@@ -15,6 +15,7 @@ from .budget import (
     ratio_to_kappa,
     snap_budget,
 )
+from .budget_select import BudgetSelection, select_by_budget
 from .sg_prune import (
     BASE_FLOATS,
     LOBE_FLOATS,
@@ -67,6 +68,8 @@ __all__ = [
     "compute_sg_colors",
     "init_encoder_from_stage1",
     "is_stage1_checkpoint",
+    "BudgetSelection",
+    "select_by_budget",
     "C0",
     "BASE_FLOATS",
     "LOBE_FLOATS",

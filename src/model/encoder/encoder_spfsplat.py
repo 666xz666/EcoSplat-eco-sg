@@ -356,6 +356,8 @@ class EncoderSPFSplat(Encoder[EncoderSPFSplatCfg]):
         # IGF stage-2: sample protect_rate + compute rate_feat once, used in merge heads below.
         # Train: PLGC-sampled rho. Eval: cfg.inference_rho (default 0.4) or context["protect_rate"] override.
         igf_active = self.igf is not None
+        budget_mode = bool(igf_active and self.cfg.igf and self.cfg.igf.get("budget_mode", False))
+        budget_stats = None
         rate_feat = None
         protect_rate = None
         if igf_active:
@@ -470,9 +472,35 @@ class EncoderSPFSplat(Encoder[EncoderSPFSplatCfg]):
             # Per-pixel opacity for L_io BCE: collapse srf+spp dims to (b, v, h*w).
             merged_opacities_per_pixel = merged_opacity_mapped.flatten(-3, -1)
 
-            # Top-k by per-pixel opacity (paper PLGC selection); rendered set shrinks with rho.
-            k = int(max(protect_rate, self.cfg.min_protect_rate) * h * w)
-            _, top_idx = torch.topk(merged_opacities_per_pixel, k=k, dim=-1)
+            # PLGC keeps a fraction of the points and every point carries all
+            # lobes; budget mode reads the same rate as a total payload and
+            # lets the allocator set the per-point lobe level instead.
+            if budget_mode:
+                assert self.sg is not None, "budget mode needs the SG colour head"
+                assert self.cfg.num_surfaces == 1, "budget mode assumes one surface"
+                from sg_wrapper import dense_floats, select_by_budget
+
+                num_lobes = int(self.sg.num_lobes)
+                sg_raw = merged_params[..., 0, 7:]  # (b, v, P, 3 + 7L)
+                _, _, sharp_raw, rgb_raw = torch.split(
+                    sg_raw, [3, 3 * num_lobes, num_lobes, 3 * num_lobes], dim=-1)
+                # D = |a| (1 - e^{-2s})：与 sg_prune.lobe_importance 同一口径，
+                # 分配器排序用的正是「删掉这一颗会损失多少」。
+                sharpness = sharp_raw.reshape(*sharp_raw.shape[:-1], num_lobes, 1).abs()
+                rgb = rgb_raw.reshape(*rgb_raw.shape[:-1], num_lobes, 3)
+                lobe_value = rgb.abs().mean(dim=-1) * (
+                    1.0 - torch.exp(-2.0 * sharpness.squeeze(-1)))
+                rate = max(float(protect_rate), float(self.cfg.min_protect_rate))
+                kappa_view = int(dense_floats(1, h, w, lobes_per_point=num_lobes) * rate)
+                selection = select_by_budget(
+                    merged_opacities_per_pixel.detach(), lobe_value.detach(),
+                    kappa_view, lobes_per_point=num_lobes)
+                top_idx = selection.index
+                budget_stats = selection
+            else:
+                # Top-k by per-pixel opacity (paper PLGC selection); rendered set shrinks with rho.
+                k = int(max(protect_rate, self.cfg.min_protect_rate) * h * w)
+                _, top_idx = torch.topk(merged_opacities_per_pixel, k=k, dim=-1)
             pts_topk = torch.gather(
                 pts_all, 2,
                 top_idx.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, pts_all.shape[-2], pts_all.shape[-1]),
@@ -485,6 +513,20 @@ class EncoderSPFSplat(Encoder[EncoderSPFSplatCfg]):
                 merged_densities, 2,
                 top_idx.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, merged_densities.shape[-2], merged_densities.shape[-1]),
             )
+
+            if budget_mode:
+                # 被剪的 lobe 用零振幅表示（与 sg_prune 的删除等价）；补位槽位
+                # 的密度置 0，映射后的不透明度就是 0，渲染时不可见。
+                head = params_topk[..., 0, :]
+                c0_m, dirs_m, sharp_m, rgb_m = torch.split(
+                    head[..., 7:], [3, 3 * num_lobes, num_lobes, 3 * num_lobes], dim=-1)
+                rgb_m = rgb_m.reshape(*rgb_m.shape[:-1], num_lobes, 3)
+                rgb_m = rgb_m * selection.keep_lobes.to(rgb_m.dtype).unsqueeze(-1)
+                params_topk = torch.cat(
+                    [head[..., :7], c0_m, dirs_m, sharp_m, rgb_m.flatten(-2)],
+                    dim=-1).unsqueeze(-2)
+                densities_topk = densities_topk * selection.valid.unsqueeze(
+                    -1).unsqueeze(-1).to(densities_topk.dtype)
 
             merged_gaussians = self.gaussian_adapter.forward(
                 pts_topk.unsqueeze(-2),
@@ -518,6 +560,15 @@ class EncoderSPFSplat(Encoder[EncoderSPFSplatCfg]):
 
 
         encoder_output = dict()
+        if budget_stats is not None:
+            encoder_output["budget"] = {
+                "rate": float(protect_rate),
+                "n_points": budget_stats.n_points,
+                "n_lobes": budget_stats.n_lobes,
+                "achieved": budget_stats.achieved,
+                "target": budget_stats.target,
+                "beta": budget_stats.beta,
+            }
 
         def _flatten_gaussians(g):
             if self.sg is not None:

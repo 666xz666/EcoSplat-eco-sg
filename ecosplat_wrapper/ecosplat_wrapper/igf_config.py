@@ -13,3 +13,8 @@ class IGFConfig:
     plgc_min0: float = 0.85
     zero_init_rate_embed: bool = True
     inference_rho: float = 0.4  # fixed protect_rate used at eval/inference (paper κ_i preset)
+    # Budget mode: read protect_rate as the fraction of the FULL float payload
+    # (35 floats per point at 3 lobes) instead of the fraction of points, and
+    # let the fused allocator split that payload between points and lobes.
+    # Off = stock PLGC (top-k points, every point keeps all lobes).
+    budget_mode: bool = False

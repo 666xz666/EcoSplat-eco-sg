@@ -1,0 +1,96 @@
+# @package _global_
+# Stage-2 IGF in TOTAL-BUDGET mode on the SG head.
+#
+# Same data, base checkpoint, optimizer and loss as the stock IGF recipe
+# (re10k_10view_sg_igf.yaml); the only change is that the sampled protect rate
+# is read as the fraction of the FULL float payload:
+#
+#     kappa = 35 * H * W * rate   (14 per point + 7 per lobe, 3 lobes/point)
+#     F*    = floor(kappa / 7) * 7
+#
+# and sg_wrapper.budget.allocate_by_price splits F* between points (m = 0..3
+# lobes each).  Zero-amplitude lobes are the deletion, so the rendered set is
+# the allocated set and L_io supervises the same full-resolution opacity map.
+#
+# The base checkpoint MUST have the same 25-ch head width — pass
+#   model.encoder.pretrained_weights=/data14T/xz/ckpt_archive/stage1_sg3_step40000.ckpt
+# at launch; the IGF branch strict-loads it inside the encoder.
+
+defaults:
+  - /dataset@_group_.re10k: re10k
+  - override /model/encoder: spfsplat
+  - override /model/encoder/backbone: croco_multi
+  - override /model/decoder: splatting_cuda
+  - override /loss: [mse, lpips, reproj]
+
+wandb:
+  name: re10k-sg3-budget-igf
+  tags: [re10k, 256x256, sg, igf, budget]
+  project: spfsplat
+
+loss:
+  reproj:
+    weight: 0.001
+    mode: "dyntanh"
+    total_iterations: 100_001
+
+model:
+  encoder:
+    backbone:
+      name: croco_multi
+      intrinsics_embed_loc: encoder
+      intrinsics_embed_type: token
+
+    pretrained_weights: ""   # override at launch with the SG base ckpt
+    min_protect_rate: 0.05   # budget floor = 5% of the dense payload (1.75 f/px)
+    sg:
+      num_lobes: 3
+    igf:
+      budget_mode: true       # rate = payload fraction; allocator picks m_i
+
+dataset:
+  re10k:
+    make_baseline_1: true
+    view_sampler:
+      warm_up_steps: 0
+      num_target_views: 1
+      num_context_views: 10
+      max_distance_between_context_views: 150
+
+optimizer:
+  lr: 1e-4
+  warm_up_steps: 2000
+  backbone_lr_multiplier: 0.1
+  min_lr_multiplier: 0.01
+
+data_loader:
+  train:
+    batch_size: 1
+
+trainer:
+  max_steps: 100_001
+  val_check_interval: 10000
+  accumulate_grad_batches: 4
+
+checkpointing:
+  every_n_train_steps: 1000
+  save_weights_only: false
+  save_top_k: 20
+
+train:
+  training_context: false
+  # The encoder already freezes everything and marks only igf.* trainable
+  # when igf is set. Keep the wrapper-level switches OFF: freeze_pretrained
+  # would unfreeze the ORIGINAL param heads too (their names contain
+  # "gaussian_param_head"), which is not the IGF recipe.
+  freeze_pretrained: false
+  freeze_pose_head: false
+  freeze_intrinsic_encoder: false
+
+test:
+  output_path: outputs/test/sg3_budget_igf
+  align_pose: false
+  compute_scores: true
+  save_image: true
+  save_video: false
+  save_compare: false
