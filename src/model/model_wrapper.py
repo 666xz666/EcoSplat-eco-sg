@@ -341,6 +341,15 @@ class ModelWrapper(LightningModule):
             and self.global_step % self.train_cfg.print_log_every_n_steps == 0
         ):
             protect_rate = encoder_output.get("protect_rate")
+            # 总预算模式下把分配结果打出来：N/L 随 rho 的变化就是「预算花在
+            # 哪根轴上」的直接读数，也是 probe 判断 mask 是否生效的依据。
+            budget = encoder_output.get("budget")
+            budget_txt = (
+                f"floats = {budget['achieved']:.0f}/{budget['target']:.0f}; "
+                f"N = {budget['n_points']:.0f}; L = {budget['n_lobes']:.0f}; "
+                f"beta = {budget['beta']:.4f}; "
+                if budget is not None else ""
+            )
             print(
                 f"Epoch {self.current_epoch}; "
                 f"train step {self.global_step}; "
@@ -351,6 +360,7 @@ class ModelWrapper(LightningModule):
                 f"psnr = {psnr.mean().item():.6f}; "
                 f"protect_rate = {protect_rate}; "
                 f"#GS = {gaussians.means.shape[1]}; "
+                f"{budget_txt}"
                 f"grad_norm = {self.last_grad_norm:.3f}; "
                 f"skipped = {self.skipped_updates}; "
                 f"peak_mem = {torch.cuda.max_memory_allocated() / 2**30:.2f} GiB"
