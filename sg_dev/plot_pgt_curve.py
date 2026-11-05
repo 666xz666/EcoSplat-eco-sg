@@ -26,6 +26,14 @@ import numpy as np
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+from matplotlib import font_manager  # noqa: E402
+
+# 中文标题在无中文字体的机器上会画成方框，这里挑第一个可用的 CJK 字体。
+for _font in ("Noto Sans CJK JP", "Noto Sans CJK SC", "WenQuanYi Zen Hei", "SimHei"):
+    if _font in {f.name for f in font_manager.fontManager.ttflist}:
+        plt.rcParams["font.family"] = _font
+        break
+plt.rcParams["axes.unicode_minus"] = False
 
 STEP_RE = re.compile(r"train step (\d+)")
 KV_RE = re.compile(r"(\w+) = (-?[\d.eE+]+|None)")
