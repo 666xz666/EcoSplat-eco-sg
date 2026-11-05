@@ -85,10 +85,17 @@ def main() -> None:
     parser.add_argument("--other", default="", help="PATH[:LABEL] for a second arm")
     parser.add_argument("--width", type=float, default=0.05)
     parser.add_argument("--window", type=int, default=25)
+    parser.add_argument(
+        "--no-common",
+        action="store_true",
+        help="compare arms over their own full logs instead of the shared step window",
+    )
     parser.add_argument("--out", default="figs/igf_rho/loss_by_rho.png")
     args = parser.parse_args()
 
-    edges = np.arange(0.05, 0.66 + 1e-9, args.width)
+    # The PLGC sampler lives in [plgc_floor, plgc_max] = [0.05, 0.95]; anything
+    # above the last edge is clipped into it rather than dropped.
+    edges = np.arange(0.05, 0.95 + 1e-9, args.width)
     data = load(args.log)
     if data["step"].size == 0:
         raise SystemExit(f"no step lines in {args.log} yet")
@@ -101,21 +108,35 @@ def main() -> None:
         if other["step"].size == 0:
             other = None
 
+    # A rho-binned loss is still partly a step effect: a longer run has simply
+    # seen more data. When two arms are compared, cut both to the shared step
+    # window so the only difference left is the head.
+    common = None
+    if other is not None and not args.no_common:
+        common = int(min(data["step"].max(), other["step"].max()))
+        data = {k: v[data["step"] <= common] for k, v in data.items()}
+        other = {**{k: v[other["step"] <= common] for k, v in other.items() if k != "label"},
+                 "label": other["label"]}
+
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     fig, axes = plt.subplots(1, 3, figsize=(15.5, 4.6))
 
     # Step 1/3: loss and PSNR over training, each bucket its own colour, so a
-    # vertical slice reads as "what the model did at this budget".
+    # vertical slice reads as "what the model did at this budget".  Colours are
+    # spread over the populated buckets only — with 18 edges but four live bins
+    # a plain colormap would paint them all the same yellow.
     idx = bin_index(data["rho"], edges)
-    cmap = plt.get_cmap("viridis")
     n_bins = edges.size - 1
+    populated = [b for b in range(n_bins) if (idx == b).any()]
+    rank = {b: k for k, b in enumerate(populated)}
+    cmap = plt.get_cmap("turbo")
     summary = []
     for b in range(n_bins):
         mask = idx == b
         if not mask.any():
             continue
-        colour = cmap(b / max(1, n_bins - 1))
+        colour = cmap(0.08 + 0.84 * rank[b] / max(1, len(populated) - 1))
         for ax, key in zip(axes[:2], ("loss", "psnr")):
             ax.plot(
                 data["step"][mask],
@@ -169,7 +190,8 @@ def main() -> None:
     axes[2].set_yscale("log")
     axes[2].set_xlabel("protect rate rho")
     axes[2].set_ylabel("median training loss")
-    axes[2].set_title("loss vs rho (median per bin)")
+    window_note = f"steps <= {common}" if common is not None else "full logs"
+    axes[2].set_title(f"loss vs rho (median per bin, {window_note})")
     axes[2].legend(fontsize=7)
 
     for ax in axes:
