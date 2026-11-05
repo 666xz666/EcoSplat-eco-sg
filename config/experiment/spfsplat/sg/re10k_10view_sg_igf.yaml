@@ -6,7 +6,7 @@
 #
 # The base checkpoint MUST have the same 25-ch head width (opacity + scale
 # 3 + rotation 4 + c0 3 + 3 lobes x 7 = 1 + 24) — pass
-#   model.encoder.pretrained_weights=<path/to/sg3_stepNNNNN.ckpt>
+#   model.encoder.pretrained_weights=/data14T/xz/ckpt_archive/stage1_sg3_step40000.ckpt
 # at launch; the IGF branch strict-loads it inside the encoder.
 
 defaults:
@@ -64,9 +64,11 @@ trainer:
   accumulate_grad_batches: 4
 
 checkpointing:
-  every_n_train_steps: 10000
+  # 1k steps ~= 50 min at 10 views; keeping 20 gives a rolling 40K-step window
+  # (~55 GB) that covers the whole rho schedule without filling the disk.
+  every_n_train_steps: 1000
   save_weights_only: false
-  save_top_k: 1
+  save_top_k: 20
 
 train:
   training_context: false
