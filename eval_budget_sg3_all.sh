@@ -2,7 +2,7 @@
 # Walk the budget-mode checkpoint down the rungs that match EcoSplat's budget
 # columns, byte for byte.
 #
-# EcoSplat keeps k = int(max(rho, 1/16) * H * W) points per view and every
+# EcoSplat keeps k = int(rho * H * W) points per view at test time and every
 # point carries 86 floats (opacity 1 + scale 3 + rotation 4 + c0 3 + SH4 75).
 # Our full configuration carries 35 floats per point (14 + 3 lobes * 7), so the
 # same payload needs rho_ours = 86 * rho_eff / 35, and the allocator then snaps
@@ -10,10 +10,16 @@
 # are that arithmetic evaluated at H = W = 256:
 #
 #   Eco column   rho_eff     Eco f/px    rho_ours               our F*    our f/px
-#   5%           0.0625      5.37500     0.15357142857142858    352254    5.37497
+#   5%           0.050000    4.30000     0.12282714843750000    281736    4.29895
 #   10%          0.0999908   8.59921     0.24569178989955356    563556    8.59918
 #   40%          0.3999939   34.39948    0.9828421456473214     2254399   34.39940
 #   70%          0.7         60.20000    not reachable: 60.2 > 35 floats / pixel
+#
+# Table 2 of the paper reports 52K, 210K and 419K gaussians at 16 views, which
+# is 3276, 13107 and 26214 per view, i.e. the nominal 5/20/40 percent without
+# the 1/16 floor that PLGC applies during training.  A run that leaves
+# min_protect_rate at 1/16 silently evaluates 6.25% instead of 5% and lands
+# about 1.2 dB high, so keep it at 0.05 for the 5% rung.
 #
 # The rho_eff values for 10% and 40% are below the nominal column because
 # int(0.10 * 65536) = 6553 and int(0.40 * 65536) = 26214 truncate.
@@ -35,7 +41,7 @@ LOG="logs/eval_${TAG}.log"
 # after the sweep it shows how the same rate is spent across scenes.
 CENSUS="${CENSUS:-logs/budget_census_${TAG}.csv}"
 export BUDGET_CENSUS_CSV="${CENSUS}"
-RUNGS="${RUNGS:-0.15357142857142858 0.24569178989955356 0.9828421456473214}"
+RUNGS="${RUNGS:-0.1228271484375 0.24569178989955356 0.9828421456473214}"
 mkdir -p logs
 
 echo "[eval] start $(date +%F' '%T) ckpt=${CKPT} index=${EVAL_INDEX} census=${CENSUS}" | tee -a "${LOG}"
