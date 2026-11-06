@@ -13,6 +13,8 @@ Args:
     edges: interval boundaries, defaults to the five reference intervals.
     floor_step: step at which the protect-rate floor is reached; drawn as a
         grey dashed line, pass 0 to hide it.
+    metric: ``loss`` or ``psnr``; the two share the layout so a run can be read
+        either as "how much error" or as "how many dB", never both in one file.
 
 Returns:
     None; writes ``out``, ``out.with_suffix('.csv')`` and prints the summary.
@@ -135,7 +137,17 @@ def third_medians(series: np.ndarray) -> tuple[float, float]:
     return float(np.median(series[:cut])), float(np.median(series[-cut:]))
 
 
-def draw_interval(ax, data: dict, low: float, high: float, level: str, floor_step: int, xmax: float) -> dict:
+def draw_interval(
+    ax,
+    data: dict,
+    low: float,
+    high: float,
+    level: str,
+    floor_step: int,
+    xmax: float,
+    metric: str = "loss",
+    ylim: tuple[float, float] | None = None,
+) -> dict:
     """Draw one protect-rate interval: scatter, rolling median and two medians.
 
     Args:
@@ -146,48 +158,58 @@ def draw_interval(ax, data: dict, low: float, high: float, level: str, floor_ste
         level: budget wording shown next to the interval.
         floor_step: step of the grey dashed line, 0 to hide it.
         xmax: shared right end of the step axis, so panels line up vertically.
+        metric: ``loss`` or ``psnr``, decides the y values and the number format.
+        ylim: shared y range; the five panels must be readable against each
+            other, so the caller computes it once over all intervals.
 
     Returns:
         Summary dict with ``n``, ``head``, ``tail`` and ``median``.
     """
-    steps, losses = collapse_steps(data["step"], data["loss"])
-    smooth = rolling_median(losses)
+    steps, values = collapse_steps(data["step"], data[metric])
+    smooth = rolling_median(values)
+    digits = 4 if metric == "loss" else 2
+    unit = "" if metric == "loss" else " dB"
 
     # Step 1/3: the scatter keeps the spread visible — a run still fighting one
     # hard scene looks very different from one that is simply flat.
-    ax.scatter(data["step"], data["loss"], s=5, c=SCATTER, alpha=0.55, linewidths=0)
+    ax.scatter(data["step"], data[metric], s=5, c=SCATTER, alpha=0.55, linewidths=0)
 
     # Step 2/3: the rolling median is what the eye should follow; it is computed
     # per step first so that four micro-batches do not outvote a single step.
     ax.plot(steps, smooth, color=MEDIAN, lw=1.3, zorder=3)
 
-    head, tail = third_medians(losses)
-    ax.text(0.03, 0.93, f"首段中位 {head:.4f}", transform=ax.transAxes, color=MEDIAN, fontsize=9)
-    ax.text(0.97, 0.93, f"末段中位 {tail:.4f}", transform=ax.transAxes, color=MEDIAN, fontsize=9, ha="right")
+    head, tail = third_medians(values)
+    ax.text(0.03, 0.93, f"首段中位 {head:.{digits}f}{unit}", transform=ax.transAxes, color=MEDIAN, fontsize=9)
+    ax.text(0.97, 0.93, f"末段中位 {tail:.{digits}f}{unit}", transform=ax.transAxes, color=MEDIAN, fontsize=9, ha="right")
 
     if floor_step:
         ax.axvline(floor_step, color="0.6", ls="--", lw=1.0, zorder=1)
 
     ax.set_title(f"ρ∈[{low:.2f},{high:.2f})　{level}　n={data['step'].size}", fontsize=10)
-    ax.set_ylim(0, 0.06)
-    ax.set_yticks(np.arange(0, 0.061, 0.01))
+    if ylim is None:
+        ax.set_ylim(0, 0.06)
+        ax.set_yticks(np.arange(0, 0.061, 0.01))
+    else:
+        ax.set_ylim(*ylim)
     ax.grid(alpha=0.25, lw=0.6)
     ax.set_xlim(0, xmax)
     return {
         "n": int(data["step"].size),
         "head": head,
         "tail": tail,
-        "median": float(np.median(data["loss"])),
+        "median": float(np.median(data[metric])),
     }
 
 
-def draw_summary(ax, stats: list[dict], edges: np.ndarray) -> None:
-    """Draw the horizontal bars with the median loss of every interval.
+def draw_summary(ax, stats: list[dict], edges: np.ndarray, metric: str = "loss") -> None:
+    """Draw the horizontal bars with the median value of every interval.
 
     Args:
         ax: target axes.
         stats: one summary dict per interval.
         edges: bucket edges, used for the y tick labels.
+        metric: ``loss`` or ``psnr``; only changes the wording and the number
+            format, the ordering stays "high budget on top".
 
     Returns:
         None.
@@ -196,6 +218,8 @@ def draw_summary(ax, stats: list[dict], edges: np.ndarray) -> None:
     values = [stats[i]["median"] for i in order]
     labels = [f"{LEVELS[i]} [{edges[i]:.2f},{edges[i + 1]:.2f})" for i in order]
     colours = [BAR_COLOURS[i] for i in order]
+    digits = 4 if metric == "loss" else 2
+    unit = "" if metric == "loss" else " dB"
 
     ax.barh(np.arange(len(order)), values, color=colours, height=0.62)
     ax.set_yticks(np.arange(len(order)))
@@ -206,10 +230,18 @@ def draw_summary(ax, stats: list[dict], edges: np.ndarray) -> None:
         if stats[i]["n"] == 0:
             ax.text(span * 0.01, pos, "无样本", va="center", fontsize=8.5, color="0.5")
             continue
-        ax.text(value + span * 0.01, pos, f"{value:.4f} (n={stats[i]['n']})", va="center", fontsize=8.5)
-    ax.set_xlim(0, span)
-    ax.set_xlabel("中位 loss（单微批）")
-    ax.set_title("各区间 loss 中位数（全程）", fontsize=10)
+        ax.text(value + span * 0.01, pos, f"{value:.{digits}f}{unit} (n={stats[i]['n']})", va="center", fontsize=8.5)
+    # A loss bar is meaningless away from zero, but a PSNR bar is meaningless at
+    # zero (25 vs 32 dB would look identical), so the dB axis starts just under
+    # the smallest bar and says so in the label.
+    if metric == "loss":
+        ax.set_xlim(0, span)
+        ax.set_xlabel("中位 loss（单微批）")
+    else:
+        low = min(values) - 1.0 if values else 0.0
+        ax.set_xlim(low, max(values) + (max(values) - low) * 0.55)
+        ax.set_xlabel(f"中位 PSNR（dB，轴从 {low:.1f} dB 起）")
+    ax.set_title(f"各区间 {metric} 中位数（全程）", fontsize=10)
     ax.grid(axis="x", alpha=0.25, lw=0.6)
     ax.set_axisbelow(True)
 
@@ -226,6 +258,7 @@ def main() -> None:
         help="five interval boundaries, low to high",
     )
     parser.add_argument("--floor-step", type=int, default=16000)
+    parser.add_argument("--metric", choices=("loss", "psnr"), default="loss")
     args = parser.parse_args()
 
     edges = np.array([float(x) for x in args.edges.split(",")])
@@ -234,6 +267,16 @@ def main() -> None:
 
     setup_font()
     data = parse_log(args.log)
+    metric = args.metric
+    # One shared y range for the five panels: with per-panel autoscaling a
+    # converged bucket and a fresh bucket look equally busy, which hides exactly
+    # the difference the figure exists to show.
+    if metric == "loss":
+        ylim = None
+    else:
+        low = float(np.percentile(data["psnr"], 1)) - 1.0
+        high = float(np.percentile(data["psnr"], 99)) + 1.0
+        ylim = (np.floor(low), np.ceil(high))
     bucket = np.clip(np.searchsorted(edges, data["rho"], side="right") - 1, 0, 4)
     # All five panels share the step axis so a vertical slice stays comparable;
     # the floor line is always inside the frame even before training reaches it.
@@ -249,29 +292,35 @@ def main() -> None:
         part = {key: values[mask] for key, values in data.items()}
         if not mask.any():
             ax.set_title(f"ρ∈[{edges[index]:.2f},{edges[index + 1]:.2f})　{LEVELS[index]}　n=0", fontsize=10)
-            ax.set_ylim(0, 0.06)
-            ax.set_yticks(np.arange(0, 0.061, 0.01))
+            if ylim is None:
+                ax.set_ylim(0, 0.06)
+                ax.set_yticks(np.arange(0, 0.061, 0.01))
+            else:
+                ax.set_ylim(*ylim)
             ax.grid(alpha=0.25, lw=0.6)
             ax.set_xlim(0, xmax)
             ax.text(0.5, 0.5, "尚无样本", transform=ax.transAxes, ha="center", va="center", color="0.5")
             stats.append({"n": 0, "head": float("nan"), "tail": float("nan"), "median": 0.0})
         else:
             stats.append(
-                draw_interval(ax, part, edges[index], edges[index + 1], LEVELS[index], args.floor_step, xmax)
+                draw_interval(
+                    ax, part, edges[index], edges[index + 1], LEVELS[index], args.floor_step, xmax, metric, ylim
+                )
             )
         if index >= 3:
             ax.set_xlabel("训练步数")
         if index % 3 == 0:
-            ax.set_ylabel("loss（单微批）")
+            ax.set_ylabel("loss（单微批）" if metric == "loss" else "PSNR（dB）")
 
-    draw_summary(fig.add_subplot(grid[1, 2]), stats, edges)
+    draw_summary(fig.add_subplot(grid[1, 2]), stats, edges, metric)
 
     last_step = int(data["step"].max())
     stamp = dt.datetime.fromtimestamp(args.log.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
     tag = args.tag or args.log.stem
     floor_note = "；灰虚线 = step 16K（此后全区间随机）" if args.floor_step else ""
+    what = "损失" if metric == "loss" else "PSNR"
     fig.suptitle(
-        f"{tag} 损失按保护率 ρ 分区间；截至 step {last_step:,}（{stamp}）{floor_note}",
+        f"{tag} {what}按保护率 ρ 分区间；截至 step {last_step:,}（{stamp}）{floor_note}",
         fontsize=14,
     )
 
@@ -285,11 +334,12 @@ def main() -> None:
                 f"{data['step'][i]},{data['loss'][i]:.6g},{data['psnr'][i]:.6g},{data['rho'][i]:.6g},{bucket[i]}\n"
             )
     print(f"wrote {args.out} and {csv_path}")
+    digits = 5 if metric == "loss" else 2
     for index in range(5):
         item = stats[index]
         print(
             f"[{edges[index]:.2f},{edges[index + 1]:.2f}) n={item['n']:5d} "
-            f"median={item['median']:.5f} head={item['head']:.5f} tail={item['tail']:.5f}"
+            f"median={item['median']:.{digits}f} head={item['head']:.{digits}f} tail={item['tail']:.{digits}f}"
         )
 
 
