@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Walk the budget-mode checkpoint down four byte-aligned rungs on the full
-# 16-view evaluation index.  0.1536 is the rung that matches EcoSplat's lowest
+# 16-view evaluation index.  0.154 is the rung that matches EcoSplat's lowest
 # budget, so its number is the same-bytes comparison; 0.40 is the high rung
 # where the point axis already saturates.
 #
@@ -12,9 +12,13 @@ cd "$(dirname "$0")"
 CKPT="${CKPT:-/data14T/xz/ckpt_archive/igf_budget_sg3_step30000.ckpt}"
 TAG="${TAG:-budget_sg3_30k}"
 LOG="logs/eval_${TAG}.log"
+# One census file for all four rungs: the allocator writes one row per scene,
+# so after the sweep it shows how the same rate is spent across scenes.
+CENSUS="${CENSUS:-logs/budget_census_${TAG}.csv}"
+export BUDGET_CENSUS_CSV="${CENSUS}"
 mkdir -p logs
 
-echo "[eval] start $(date +%F' '%T) ckpt=${CKPT}" | tee -a "${LOG}"
+echo "[eval] start $(date +%F' '%T) ckpt=${CKPT} census=${CENSUS}" | tee -a "${LOG}"
 for rv in 0.05 0.10 0.154 0.40; do
     echo "[eval] rho=${rv} start $(date +%F' '%T)" | tee -a "${LOG}"
     if RHO="${rv}" CKPT="${CKPT}" TAG="${TAG}" bash eval_budget_sg3_rho.sh >> "${LOG}" 2>&1; then

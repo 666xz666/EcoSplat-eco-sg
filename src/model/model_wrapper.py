@@ -471,7 +471,24 @@ class ModelWrapper(LightningModule):
 
         (scene,) = batch["scene"]
         rgb_gt = batch["target"]["image"][0]
-        
+
+        # 预算普查：budget 模式下把每个场景的分配结果逐行落盘，用于回答
+        # 「同一个总预算在不同场景里是怎么花的」。写到环境变量指定的 CSV，
+        # 不设变量时零开销、不改变任何行为。
+        census_path = os.environ.get("BUDGET_CENSUS_CSV")
+        budget_stats = encoder_output.get("budget")
+        if census_path and budget_stats is not None:
+            hist = "|".join(str(c) for c in (budget_stats.get("m_hist") or []))
+            row = f"{scene},{budget_stats['rate']:.6f},{budget_stats['n_points']}" \
+                  f",{budget_stats['n_lobes']},{budget_stats['achieved']}" \
+                  f",{budget_stats['target']},{budget_stats['beta']:.6g},{hist}\n"
+            fresh = not os.path.exists(census_path)
+            with open(census_path, "a") as handle:
+                if fresh:
+                    handle.write(
+                        "scene,rate,n_points,n_lobes,achieved,target,beta,m_hist\n")
+                handle.write(row)
+
         # compute scores
         if self.test_cfg.compute_scores:
             overlap = batch["context"]["overlap"][0]

@@ -358,6 +358,7 @@ class EncoderSPFSplat(Encoder[EncoderSPFSplatCfg]):
         igf_active = self.igf is not None
         budget_mode = bool(igf_active and self.cfg.igf and self.cfg.igf.get("budget_mode", False))
         budget_stats = None
+        budget_m_hist = None
         rate_feat = None
         protect_rate = None
         if igf_active:
@@ -497,6 +498,12 @@ class EncoderSPFSplat(Encoder[EncoderSPFSplatCfg]):
                     kappa_view, lobes_per_point=num_lobes)
                 top_idx = selection.index
                 budget_stats = selection
+                # 每点买到几颗 lobe 的直方图（只数有效槽位）。同一预算在不同
+                # 场景里可能全花在点上、也可能给每个点配 lobe，这张直方图
+                # 就是「预算怎么花」的分布，评估时按场景落盘。
+                m_per_point = selection.keep_lobes.sum(-1).to(torch.long)
+                budget_m_hist = torch.bincount(
+                    m_per_point[selection.valid], minlength=num_lobes + 1).tolist()
             else:
                 # Top-k by per-pixel opacity (paper PLGC selection); rendered set shrinks with rho.
                 k = int(max(protect_rate, self.cfg.min_protect_rate) * h * w)
@@ -568,6 +575,7 @@ class EncoderSPFSplat(Encoder[EncoderSPFSplatCfg]):
                 "achieved": budget_stats.achieved,
                 "target": budget_stats.target,
                 "beta": budget_stats.beta,
+                "m_hist": budget_m_hist,
             }
 
         def _flatten_gaussians(g):
