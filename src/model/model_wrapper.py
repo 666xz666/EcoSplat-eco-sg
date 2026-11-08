@@ -380,6 +380,18 @@ class ModelWrapper(LightningModule):
         b, v_tgt, _, h, w = batch["target"]["image"].shape
         assert b == 1
 
+        # 像素级预算诊断：记录当前场景名，并把目标图像落盘，供离线算误差图。
+        # 未设置 SG_PIXEL_DUMP_DIR 时 dump_target 立即返回，评测路径不受影响。
+        try:
+            from sg_wrapper.pixel_dump import dump_target as _sg_dump_target
+            from sg_wrapper.pixel_dump import set_scene as _sg_set_scene
+        except ImportError:
+            _sg_dump_target = None
+        if _sg_dump_target is not None:
+            _scene = batch["scene"][0]
+            _sg_set_scene(_scene)
+            _sg_dump_target(_scene, batch["target"]["image"][0], batch["target"]["index"][0].tolist())
+
         if batch_idx % 100 == 0:
             print(f"Test step {batch_idx:0>6}.")
 

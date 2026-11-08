@@ -144,6 +144,15 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
         depth = rearrange(depth, "(b v) 1 h w -> b v h w", b=b, v=v)
         alpha = rearrange(alpha, "(b v) 1 h w -> b v h w", b=b, v=v)
 
+        # 像素级预算诊断：把这一视角实际参与渲染的基元和结果落盘，供离线统计
+        # 每像素覆盖的点数与 lobe 数。未设置 SG_PIXEL_DUMP_DIR 时立即返回。
+        try:
+            from sg_wrapper.pixel_dump import maybe_dump as _sg_maybe_dump
+
+            _sg_maybe_dump(gaussians, extrinsics, intrinsics, image_shape, color, alpha, depth)
+        except ImportError:
+            pass
+
         if self.make_scale_invariant:
             scale = near / 1
             depth = depth * scale[:, :, None, None]
