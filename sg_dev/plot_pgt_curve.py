@@ -98,15 +98,17 @@ def aggregate(raw):
 
 
 def rolling(x, w, how="mean"):
-    """Centred rolling statistic that keeps the array length."""
+    """Trailing rolling statistic that keeps the array length."""
     if w <= 1:
         return x
     if how == "median":
         return np.array([np.nanmedian(x[max(0, i - w + 1) : i + 1]) for i in range(len(x))])
-    c = np.convolve(np.nan_to_num(x, nan=0.0), np.ones(w) / w, mode="full")
-    valid = np.convolve(~np.isnan(x), np.ones(w), mode="full")
+    # 分子用未除窗宽的窗口和、分母是窗口内的有效点数，二者相除才是均值。
+    # 若分子先除一次 w 再除一次点数，整条曲线会正好小 w 倍。
+    total = np.convolve(np.nan_to_num(x, nan=0.0), np.ones(w), mode="full")
+    count = np.convolve(~np.isnan(x), np.ones(w), mode="full")
     with np.errstate(invalid="ignore", divide="ignore"):
-        out = c / valid
+        out = total / np.maximum(count, 1)
     return out[: len(x)]
 
 
