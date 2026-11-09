@@ -647,13 +647,20 @@ class ModelWrapper(LightningModule):
         def convert_tensors_to_values(metrics_dict):
             return {k: convert_tensors_to_values(v) if isinstance(v, dict) else v.item() for k, v in metrics_dict.items()}
 
-        running_metrics = convert_tensors_to_values(self.running_metrics)
-        with (self.test_cfg.output_path / name  / f"scores_all_avg.json").open("w") as f:
-            json.dump(running_metrics, f, indent=2)
+        # 走 test.compute_scores=false 时 test_step 不建 running_metrics，
+        # 这一段仍会执行，缺了守卫会在 dump 全部写完之后抛 AttributeError，
+        # 让整次评测以 rc=1 收尾（数据其实是好的）。
+        running_metrics = getattr(self, "running_metrics", None)
+        if running_metrics is not None:
+            running_metrics = convert_tensors_to_values(running_metrics)
+            with (self.test_cfg.output_path / name  / f"scores_all_avg.json").open("w") as f:
+                json.dump(running_metrics, f, indent=2)
 
-        running_metrics_sub = convert_tensors_to_values(self.running_metrics_sub)
-        with (self.test_cfg.output_path / name  / f"scores_sub_avg.json").open("w") as f:
-            json.dump(running_metrics_sub, f, indent=2)
+        running_metrics_sub = getattr(self, "running_metrics_sub", None)
+        if running_metrics_sub is not None:
+            running_metrics_sub = convert_tensors_to_values(running_metrics_sub)
+            with (self.test_cfg.output_path / name  / f"scores_sub_avg.json").open("w") as f:
+                json.dump(running_metrics_sub, f, indent=2)
 
         for item in ['R', 't']:
             if self.encoder.cfg.estimating_pose:
