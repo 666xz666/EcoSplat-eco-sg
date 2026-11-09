@@ -662,11 +662,15 @@ class ModelWrapper(LightningModule):
             with (self.test_cfg.output_path / name  / f"scores_sub_avg.json").open("w") as f:
                 json.dump(running_metrics_sub, f, indent=2)
 
+        # 位姿误差统计同样依赖 test_step 建好的累积容器；关掉打分时它们不存在，
+        # 跳过这一段，避免在 dump 写完之后才抛 AttributeError。
+        pose_metrics = getattr(self, "all_mertrics", None)
+        pose_metrics_sub = getattr(self, "all_mertrics_sub", None)
         for item in ['R', 't']:
-            if self.encoder.cfg.estimating_pose:
+            if self.encoder.cfg.estimating_pose and pose_metrics is not None and pose_metrics_sub is not None:
                 print("*"*20)
                 for method in ['ours']:
-                    tot_e_pose = np.array(self.all_mertrics[f"cxt_e_{item}"])
+                    tot_e_pose = np.array(pose_metrics[f"cxt_e_{item}"])
                     tot_e_pose = np.array(tot_e_pose)
                     thresholds = [5, 10, 20]
                     auc = pose_auc(tot_e_pose, thresholds)
@@ -676,8 +680,8 @@ class ModelWrapper(LightningModule):
                     self.running_metrics[f'{item}_median'] = median_error
                     print(f"Pose AUC {method} of {item}: ", auc, " median error", median_error)
 
-                    for overlap_tag in self.all_mertrics_sub.keys():
-                        tot_e_pose = np.array(self.all_mertrics_sub[overlap_tag][f"cxt_e_{item}"])
+                    for overlap_tag in pose_metrics_sub.keys():
+                        tot_e_pose = np.array(pose_metrics_sub[overlap_tag][f"cxt_e_{item}"])
                         tot_e_pose = np.array(tot_e_pose)
                         thresholds = [5, 10, 20]
                         auc = pose_auc(tot_e_pose, thresholds)
