@@ -206,7 +206,21 @@ def main() -> None:
     parser.add_argument("--dump-root", default="/data14T/xz/figs/pixel_dump")
     parser.add_argument("--scores-root", default="outputs/test")
     parser.add_argument("--skip-dumps", action="store_true")
+    parser.add_argument("--paired", action="store_true", help="额外跑我方 vs Eco 的配对偏置表")
     args = parser.parse_args()
+
+    if args.paired:
+        # 三档同字节配对：目录名带 tag，两侧 tag 一致，便于直接对齐。
+        for tag, label in [
+            ("0p12283", "4.30 f/px (5%)"),
+            ("0p24569", "8.60 f/px (10%)"),
+            ("0p98284", "34.40 f/px (40%)"),
+        ]:
+            paired_bias(
+                os.path.join(args.dump_root, f"rho_{tag}"),
+                os.path.join(args.dump_root, f"eco_rho_{tag}"),
+                label,
+            )
 
     if not args.skip_dumps:
         for dump_dir in sorted(glob.glob(os.path.join(args.dump_root, "rho_*"))):
