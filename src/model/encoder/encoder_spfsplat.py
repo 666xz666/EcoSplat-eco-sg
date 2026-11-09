@@ -522,12 +522,21 @@ class EncoderSPFSplat(Encoder[EncoderSPFSplatCfg]):
             )
 
             if budget_mode:
-                # 被剪的 lobe 用零振幅表示（与 sg_prune 的删除等价）；补位槽位
-                # 的密度置 0，映射后的不透明度就是 0，渲染时不可见。
+                # 步骤1：保持预算选择不变，仅在显式开启时补回被删 lobe 的球面均值。
+                # 补偿在原始颜色系数空间执行；补位槽位密度仍置零，不参与渲染。
                 head = params_topk[..., 0, :]
                 c0_m, dirs_m, sharp_m, rgb_m = torch.split(
                     head[..., 7:], [3, 3 * num_lobes, num_lobes, 3 * num_lobes], dim=-1)
                 rgb_m = rgb_m.reshape(*rgb_m.shape[:-1], num_lobes, 3)
+                if self.cfg.igf.get("budget_color_compensation", False):
+                    from sg_wrapper.sg_prune import compensate_pruned_lobes
+
+                    sharp_activated = sharp_m.reshape(
+                        *sharp_m.shape[:-1], num_lobes, 1).abs()
+                    compensated = compensate_pruned_lobes(
+                        c0_m, rgb_m, sharp_activated, selection.keep_lobes)
+                    c0_m = torch.where(selection.valid.unsqueeze(-1), compensated, c0_m)
+                # 步骤2：先补偿再清零，保留训练时对颜色及锐度的梯度。
                 rgb_m = rgb_m * selection.keep_lobes.to(rgb_m.dtype).unsqueeze(-1)
                 params_topk = torch.cat(
                     [head[..., :7], c0_m, dirs_m, sharp_m, rgb_m.flatten(-2)],

@@ -47,6 +47,7 @@ model:
       num_lobes: 3
     igf:
       budget_mode: true       # rate = payload fraction; allocator picks m_i
+      budget_color_compensation: false  # sphere-mean c0 correction after selection
 
 dataset:
   re10k:
