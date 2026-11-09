@@ -18,3 +18,7 @@ class IGFConfig:
     # let the fused allocator split that payload between points and lobes.
     # Off = stock PLGC (top-k points, every point keeps all lobes).
     budget_mode: bool = False
+    # Budget mode only: add the removed lobes' sphere-average color back into
+    # c0 (closed form, no extra parameters). Off = plain masking, which drops
+    # the DC component the removed lobes carried.
+    budget_color_compensation: bool = False

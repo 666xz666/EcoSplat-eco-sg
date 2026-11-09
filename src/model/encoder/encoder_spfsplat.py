@@ -531,10 +531,18 @@ class EncoderSPFSplat(Encoder[EncoderSPFSplatCfg]):
                 if self.cfg.igf.get("budget_color_compensation", False):
                     from sg_wrapper.sg_prune import compensate_pruned_lobes
 
+                    # rgb_m 是头的原始输出，适配器还会乘 rgb_scale 才是 SH 空间的振幅；
+                    # 补偿必须和 c0 同空间，所以这里先换算再求和。
+                    rgb_scale = float(getattr(
+                        getattr(self.gaussian_adapter, "sg_cfg", None),
+                        "rgb_scale", 0.1))
+                    sharpness_scale = float(getattr(
+                        getattr(self.gaussian_adapter, "sg_cfg", None),
+                        "sharpness_scale", 1.0))
                     sharp_activated = sharp_m.reshape(
-                        *sharp_m.shape[:-1], num_lobes, 1).abs()
+                        *sharp_m.shape[:-1], num_lobes, 1).abs() * sharpness_scale
                     compensated = compensate_pruned_lobes(
-                        c0_m, rgb_m, sharp_activated, selection.keep_lobes)
+                        c0_m, rgb_m * rgb_scale, sharp_activated, selection.keep_lobes)
                     c0_m = torch.where(selection.valid.unsqueeze(-1), compensated, c0_m)
                 # 步骤2：先补偿再清零，保留训练时对颜色及锐度的梯度。
                 rgb_m = rgb_m * selection.keep_lobes.to(rgb_m.dtype).unsqueeze(-1)
