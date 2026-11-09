@@ -91,20 +91,20 @@ def _project(means: torch.Tensor, covs: torch.Tensor, w2c: torch.Tensor, k_mat: 
 
 
 def _accumulate(u: torch.Tensor, v: torch.Tensor, s2: torch.Tensor, weight: torch.Tensor,
-                height: int, width: int, radius: float) -> torch.Tensor:
+                height: int, width: int, radius: float) -> tuple[torch.Tensor, torch.Tensor]:
     """按椭圆足迹把权重累加到像素上。
 
     Args:
         u: (N,) 像素中心 x。
         v: (N,) 像素中心 y。
         s2: (N, 2, 2) 2D 协方差。
-        weight: (N,) 每个基元贡献的量（1 或 lobe 数或 float 成本）。
+        weight: (N,) 每个基元贡献的量（1 或 lobe 数或摊销后的 float 成本）。
         height: 图像高。
         width: 图像宽。
         radius: 马氏距离阈值（像素半径按 3σ 取）。
 
     Returns:
-        (H*W,) 累加结果。
+        (image, hits)：累加图 (H, W) 与每个基元落在图内的像素个数 (N,)。
     """
     inv = torch.linalg.inv(s2)
     cu = u.round().long()
@@ -112,6 +112,7 @@ def _accumulate(u: torch.Tensor, v: torch.Tensor, s2: torch.Tensor, weight: torc
     half = int(np.ceil(torch.linalg.eigvalsh(s2).max().sqrt().item() * radius)) + 1
     half = max(1, min(half, 31))
     out = torch.zeros(height * width, dtype=weight.dtype)
+    hits = torch.zeros(u.shape[0], dtype=weight.dtype)
     r2 = radius * radius
     # 步骤1：固定窗口逐偏移广播，全部是向量化算子，65k 基元 × 窗口 < 1 s。
     for dy in range(-half, half + 1):
@@ -134,7 +135,8 @@ def _accumulate(u: torch.Tensor, v: torch.Tensor, s2: torch.Tensor, weight: torc
             hit = ok & (m2 < r2)
             if bool(hit.any()):
                 out.index_add_(0, (yy[hit] * width + xx[hit]), weight[hit])
-    return out.reshape(height, width)
+                hits.index_add_(0, hit.nonzero(as_tuple=True)[0], torch.ones_like(weight[hit]))
+    return out.reshape(height, width), hits
 
 
 def _panel_stats(pts: torch.Tensor, lobes: torch.Tensor, floats: torch.Tensor,
@@ -193,18 +195,26 @@ def _plot(dump: dict, target: torch.Tensor, out_png: str) -> dict:
     m = _lobe_counts(dump.get("sg_rgb"), means.shape[0])
     keep = valid & (opac > OPACITY_TAU)
     ones = torch.ones(int(keep.sum()), dtype=torch.float32)
-    pts = _accumulate(u[keep], v[keep], s2[keep], ones, height, width, radius=3.0)
-    lobes = _accumulate(u[keep], v[keep], s2[keep], m[keep].float(), height, width, radius=3.0)
-    floats = FLOATS_PER_POINT * pts + FLOATS_PER_LOBE * lobes
+    pts, _ = _accumulate(u[keep], v[keep], s2[keep], ones, height, width, radius=3.0)
+    lobes, _ = _accumulate(u[keep], v[keep], s2[keep], m[keep].float(), height, width, radius=3.0)
+
+    # 步骤1：float 成本按足迹面积摊销。overdraw 口径下「每像素成本」的求和会等于
+    # 「覆盖次数 × 每基元成本」，比真实账本大一到两个数量级；除以每个基元实际覆盖的
+    # 像素数之后，整幅求和才回到 14N + 7L，才能和预算上限直接比较。
+    cost = (FLOATS_PER_POINT + FLOATS_PER_LOBE * m[keep].float())
+    _, hits = _accumulate(u[keep], v[keep], s2[keep], ones, height, width, radius=3.0)
+    per_px = cost / hits.clamp_min(1.0)
+    floats, _ = _accumulate(u[keep], v[keep], s2[keep], per_px, height, width, radius=3.0)
 
     rgb = dump["color"].permute(1, 2, 0).clamp(0, 1).numpy()
     gt = target.permute(1, 2, 0).clamp(0, 1).numpy()
     err = (dump["color"] - target).abs().mean(dim=0)
 
     stats = _panel_stats(pts, lobes, floats, err)
-    # 对账：像素级口径的总 float 应等于「点数 × 14 + lobe 数 × 7」的全局账本。
+    # 对账：摊销后整幅求和应等于「点数 × 14 + lobe 数 × 7」的全局账本。
     stats["floats_global"] = float((FLOATS_PER_POINT * keep.sum() + FLOATS_PER_LOBE * m[keep].sum()).item())
     stats["floats_pixel"] = float(floats.sum().item())
+    stats["floats_budget"] = stats["floats_global"] / float(height * width)
 
     fig, axes = plt.subplots(2, 3, figsize=(13.5, 7.6))
     axes[0, 0].imshow(rgb)
@@ -216,9 +226,9 @@ def _plot(dump: dict, target: torch.Tensor, out_png: str) -> dict:
     fig.colorbar(im2, ax=axes[0, 2], fraction=0.046)
 
     for ax, field, name in (
-        (axes[1, 0], pts, "points / pixel"),
-        (axes[1, 1], lobes, "lobes / pixel"),
-        (axes[1, 2], floats, "floats / pixel (14N+7L)"),
+        (axes[1, 0], pts, "coverage: points / pixel"),
+        (axes[1, 1], lobes, "coverage: lobes / pixel"),
+        (axes[1, 2], floats, "floats / pixel (amortized)"),
     ):
         im = ax.imshow(field.numpy(), cmap="turbo", vmin=0, vmax=max(1.0, float(field.max())))
         ax.set_title(name)
@@ -264,7 +274,8 @@ def main() -> None:
         stats = _plot(dump, target, out_png)
         print(
             f"{scene}  pts={stats['pts_mean']:.2f} lobes={stats['lobes_mean']:.2f} "
-            f"floats={stats['floats_mean']:.1f} (p95 {stats['floats_p95']:.0f}) "
+            f"floats={stats['floats_mean']:.2f}/px (p95 {stats['floats_p95']:.0f}, "
+            f"budget {stats['floats_budget']:.2f}/px) "
             f"empty={100 * stats['empty_frac']:.1f}% err={stats['err_mean']:.4f} "
             f"err@empty={100 * stats['err_share_empty']:.1f}% "
             f"ledger={stats['floats_pixel']:.0f}/{stats['floats_global']:.0f}"

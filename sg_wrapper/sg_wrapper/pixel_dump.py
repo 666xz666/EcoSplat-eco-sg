@@ -54,13 +54,15 @@ def _enabled_for(scene: str) -> str | None:
     return out_dir
 
 
-def dump_target(scene: str, target_image: torch.Tensor, indices=None) -> None:
+def dump_target(scene: str, target_image: torch.Tensor, indices=None,
+                context_image: torch.Tensor | None = None) -> None:
     """保存该场景的目标图像，供离线算逐像素误差。
 
     Args:
         scene: 场景 hash。
         target_image: (V, 3, H, W) 目标视角图像，取值 [0, 1]。
         indices: 目标视角帧号，可选，仅作记录。
+        context_image: (Vc, 3, H, W) 上下文视角图像，可选，只用来记录平均亮度。
 
     Returns:
         None
@@ -74,6 +76,11 @@ def dump_target(scene: str, target_image: torch.Tensor, indices=None) -> None:
     }
     if indices is not None:
         payload["target_index"] = indices
+    # 步骤1：记每张图的平均亮度，用来判断输入与目标本身是否存在曝光差。
+    # 这一步只看输入数据，不涉及任何渲染结果，因此可以当作场景属性的证据。
+    payload["target_mean"] = target_image.detach().float().mean(dim=(1, 2, 3)).cpu()
+    if context_image is not None:
+        payload["context_mean"] = context_image.detach().float().mean(dim=(1, 2, 3)).cpu()
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, f"{scene}_target.pt")
     torch.save(payload, path)

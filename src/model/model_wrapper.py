@@ -390,7 +390,13 @@ class ModelWrapper(LightningModule):
         if _sg_dump_target is not None:
             _scene = batch["scene"][0]
             _sg_set_scene(_scene)
-            _sg_dump_target(_scene, batch["target"]["image"][0], batch["target"]["index"][0].tolist())
+            # 上下文图像只用于记录平均亮度：判断输入与目标是否存在曝光差。
+            _sg_dump_target(
+                _scene,
+                batch["target"]["image"][0],
+                batch["target"]["index"][0].tolist(),
+                batch["context"]["image"][0],
+            )
 
         if batch_idx % 100 == 0:
             print(f"Test step {batch_idx:0>6}.")
