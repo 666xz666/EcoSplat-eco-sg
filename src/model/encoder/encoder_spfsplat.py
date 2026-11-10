@@ -522,25 +522,14 @@ class EncoderSPFSplat(Encoder[EncoderSPFSplatCfg]):
             )
 
             if budget_mode:
-                if not getattr(self, "_comp_probe_done", False):
-                    self._comp_probe_done = True
-                    print(
-                        "[comp-probe] flag=%s budget_mode=%s removed=%d keys=%s"
-                        % (
-                            self.cfg.igf.get("budget_color_compensation", False),
-                            budget_mode,
-                            int((~selection.keep_lobes).sum()),
-                            sorted(self.cfg.igf.keys()),
-                        ),
-                        flush=True,
-                    )
+                comp_on = bool(self.cfg.igf.get("budget_color_compensation", False))
                 # 步骤1：保持预算选择不变，仅在显式开启时补回被删 lobe 的球面均值。
                 # 补偿在原始颜色系数空间执行；补位槽位密度仍置零，不参与渲染。
                 head = params_topk[..., 0, :]
                 c0_m, dirs_m, sharp_m, rgb_m = torch.split(
                     head[..., 7:], [3, 3 * num_lobes, num_lobes, 3 * num_lobes], dim=-1)
                 rgb_m = rgb_m.reshape(*rgb_m.shape[:-1], num_lobes, 3)
-                if self.cfg.igf.get("budget_color_compensation", False):
+                if comp_on:
                     from sg_wrapper.sg_prune import compensate_pruned_lobes
 
                     # rgb_m 是头的原始输出，适配器还会乘 rgb_scale 才是 SH 空间的振幅；
@@ -555,7 +544,32 @@ class EncoderSPFSplat(Encoder[EncoderSPFSplatCfg]):
                         *sharp_m.shape[:-1], num_lobes, 1).abs() * sharpness_scale
                     compensated = compensate_pruned_lobes(
                         c0_m, rgb_m * rgb_scale, sharp_activated, selection.keep_lobes)
+                    if not getattr(self, "_comp_probe_done", False):
+                        self._comp_probe_done = True
+                        delta = (compensated - c0_m).reshape(-1, 3)
+                        touched = (delta.abs().amax(dim=-1) > 0).sum()
+                        print(
+                            "[comp-probe] flag=True removed=%d kept=%d touched=%d"
+                            " delta|mean|=%.3e delta_max=%.3e c0|mean|=%.3e"
+                            % (
+                                int((~selection.keep_lobes).sum()),
+                                int(selection.keep_lobes.sum()),
+                                int(touched),
+                                delta.abs().mean().item(),
+                                delta.abs().max().item(),
+                                c0_m.reshape(-1, 3).abs().mean().item(),
+                            ),
+                            flush=True,
+                        )
                     c0_m = torch.where(selection.valid.unsqueeze(-1), compensated, c0_m)
+                elif not getattr(self, "_comp_probe_done", False):
+                    self._comp_probe_done = True
+                    print(
+                        "[comp-probe] flag=False removed=%d kept=%d"
+                        % (int((~selection.keep_lobes).sum()),
+                           int(selection.keep_lobes.sum())),
+                        flush=True,
+                    )
                 # 步骤2：先补偿再清零，保留训练时对颜色及锐度的梯度。
                 rgb_m = rgb_m * selection.keep_lobes.to(rgb_m.dtype).unsqueeze(-1)
                 params_topk = torch.cat(
