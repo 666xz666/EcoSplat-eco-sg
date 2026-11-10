@@ -522,6 +522,18 @@ class EncoderSPFSplat(Encoder[EncoderSPFSplatCfg]):
             )
 
             if budget_mode:
+                if not getattr(self, "_comp_probe_done", False):
+                    self._comp_probe_done = True
+                    print(
+                        "[comp-probe] flag=%s budget_mode=%s removed=%d keys=%s"
+                        % (
+                            self.cfg.igf.get("budget_color_compensation", False),
+                            budget_mode,
+                            int((~selection.keep_lobes).sum()),
+                            sorted(self.cfg.igf.keys()),
+                        ),
+                        flush=True,
+                    )
                 # 步骤1：保持预算选择不变，仅在显式开启时补回被删 lobe 的球面均值。
                 # 补偿在原始颜色系数空间执行；补位槽位密度仍置零，不参与渲染。
                 head = params_topk[..., 0, :]
