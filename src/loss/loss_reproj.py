@@ -120,7 +120,7 @@ class LossReproj(Loss[LossReprojCfg, LossReprojCfgWrapper]):
         # Compute the dynamic tanh loss
         elif self.cfg.mode == "dyntanh":
             # Compute the progress over the training process.
-            schedule_weight = iteration / self.cfg.total_iterations
+            schedule_weight = min(iteration / self.cfg.total_iterations, 1.0)
 
             # Optionally scale it using the circular schedule.
             if self.cfg.circle_schedule:
