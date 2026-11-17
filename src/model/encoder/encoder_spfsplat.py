@@ -23,6 +23,7 @@ from .common.gaussian_adapter import GaussianAdapter, GaussianAdapterCfg, Unifie
 from .encoder import Encoder
 from .visualization.encoder_visualizer_epipolar_cfg import EncoderVisualizerEpipolarCfg
 from ...misc.cam_utils import camera_normalization, convert_pose_to_4x4, depth_projector
+from ...misc import stage_prof
 from ...geometry.camera_emb import get_plucker_embedding
 from .heads.pose_head import PoseHeadCfg
 from ...misc.intrinsics_utils import estimate_intrinsics
@@ -332,6 +333,7 @@ class EncoderSPFSplat(Encoder[EncoderSPFSplatCfg]):
                 "cfg.model.encoder.pretrained_weights."
             )
 
+        _t_backbone = stage_prof.tick()
         if target is not None:
             v_tgt = target["image"].shape[1]
             context_target = {
@@ -350,6 +352,7 @@ class EncoderSPFSplat(Encoder[EncoderSPFSplatCfg]):
             # Encode the context images.
             out = self.backbone(context_input)
             dec_feat = out['dec_feat']
+        stage_prof.tock("backbone", _t_backbone)
 
         shape, images = out["shape"], out["images"]
         
@@ -378,13 +381,16 @@ class EncoderSPFSplat(Encoder[EncoderSPFSplatCfg]):
 
 
             # Pts3d head (context only)
+            _t_depth = stage_prof.tick()
             res1 = self._downstream_head(1, [tok[:, 0].float() for tok in dec_feat], shape[:, 0])
             all_mean_res.append(res1)
             for i in range(1, v_cxt):
                 res2 = self._downstream_head(2, [tok[:, i].float() for tok in dec_feat], shape[:, i])
                 all_mean_res.append(res2)
+            stage_prof.tock("depth_head", _t_depth)
 
             # Gaussian parameter head (context only)
+            _t_gs = stage_prof.tick()
             if 'dpt' in self.gs_params_head_type:
                 GS_res1 = self._head_forward(self.gaussian_param_head, [tok[:, 0].float() for tok in dec_feat], images[:, 0, :3], shape[0, 0].cpu().tolist())
                 GS_res1 = rearrange(GS_res1, "b d h w -> b (h w) d")
@@ -407,6 +413,7 @@ class EncoderSPFSplat(Encoder[EncoderSPFSplatCfg]):
                         merged_other_params.append(rearrange(GS_res2_m, "b d h w -> b (h w) d"))
             else:
                 raise NotImplementedError(f"unexpected {self.gs_params_head_type=}")
+            stage_prof.tock("gs_head", _t_gs)
             
 
             # Pose head
@@ -493,11 +500,16 @@ class EncoderSPFSplat(Encoder[EncoderSPFSplatCfg]):
                     1.0 - torch.exp(-2.0 * sharpness.squeeze(-1)))
                 rate = max(float(protect_rate), float(self.cfg.min_protect_rate))
                 kappa_view = int(dense_floats(1, h, w, lobes_per_point=num_lobes) * rate)
+                _t_alloc = stage_prof.tick()
                 selection = select_by_budget(
                     merged_opacities_per_pixel.detach(), lobe_value.detach(),
                     kappa_view, lobes_per_point=num_lobes)
+                stage_prof.tock("alloc", _t_alloc)
                 top_idx = selection.index
                 budget_stats = selection
+                stage_prof.note("points_per_view", selection.n_points)
+                stage_prof.note("lobes_per_view", selection.n_lobes)
+                stage_prof.note("floats_per_view", selection.achieved)
                 # 每点买到几颗 lobe 的直方图（只数有效槽位）。同一预算在不同
                 # 场景里可能全花在点上、也可能给每个点配 lobe，这张直方图
                 # 就是「预算怎么花」的分布，评估时按场景落盘。
@@ -507,7 +519,9 @@ class EncoderSPFSplat(Encoder[EncoderSPFSplatCfg]):
             else:
                 # Top-k by per-pixel opacity (paper PLGC selection); rendered set shrinks with rho.
                 k = int(max(protect_rate, self.cfg.min_protect_rate) * h * w)
+                _t_alloc = stage_prof.tick()
                 _, top_idx = torch.topk(merged_opacities_per_pixel, k=k, dim=-1)
+                stage_prof.tock("alloc", _t_alloc)
             pts_topk = torch.gather(
                 pts_all, 2,
                 top_idx.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, pts_all.shape[-2], pts_all.shape[-1]),

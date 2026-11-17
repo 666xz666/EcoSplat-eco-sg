@@ -7,6 +7,7 @@ from jaxtyping import Float
 from torch import Tensor
 
 from ...dataset import DatasetCfg
+from ...misc import stage_prof
 from ..types import Gaussians
 from .cuda_splatting import DepthRenderingMode, render_cuda
 from .decoder import Decoder, DecoderOutput
@@ -77,6 +78,7 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
             # and only the kept lobes (K x 7) are stored.
             gaussians = apply_runtime_lobe_budget(gaussians)
 
+            _t_color = stage_prof.tick()
             if getattr(gaussians, "sg_packed_directions", None) is not None:
                 sg_colors = compute_packed_sg_colors(
                     repeat(gaussians.means, "b g xyz -> (b v) g xyz", v=v),
@@ -98,6 +100,8 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                     rearrange(extrinsics, "b v i j -> (b v) i j"),
                     clamp_colors=getattr(gaussians, "clamp_colors", False),
                 )
+            stage_prof.tock("sg_color", _t_color)
+            _t_raster = stage_prof.tick()
             color, depth, alpha = render_cuda(
                 rearrange(extrinsics, "b v i j -> (b v) i j"),
                 rearrange(intrinsics, "b v i j -> (b v) i j"),
@@ -116,11 +120,13 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                 enable_sh_grad=self.enable_sh_grad,
                 gaussian_colors=sg_colors,
             )
+            stage_prof.tock("raster", _t_raster)
         else:
             # SH arm of the colour budget: SH_KEEP_DEGREE drops whole SH
             # bands at inference (a no-op when the variable is unset).
             if sh_budget is not None:
                 gaussians = sh_budget(gaussians)
+            _t_raster = stage_prof.tick()
             color, depth, alpha = render_cuda(
                 rearrange(extrinsics, "b v i j -> (b v) i j"),
                 rearrange(intrinsics, "b v i j -> (b v) i j"),
@@ -138,6 +144,7 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
                 enable_cov_grad=self.enable_cov_grad,
                 enable_sh_grad=self.enable_sh_grad
             )
+            stage_prof.tock("raster", _t_raster)
         color = rearrange(color, "(b v) c h w -> b v c h w", b=b, v=v)
 
         
