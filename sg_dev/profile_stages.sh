@@ -16,7 +16,7 @@
 #
 # Profiles land in figs/prof/<tag>.json, logs in logs/prof_<tag>.log.
 set -uo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 PY="${PY:-/data14T/xz/miniconda3/envs/ecosplat/bin/python}"
 : "${CUDA_VISIBLE_DEVICES:=GPU-f44dce23-ff1c-5f41-c1b5-d5aa1ad49cc5}"
