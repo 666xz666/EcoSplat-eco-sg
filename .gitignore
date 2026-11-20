@@ -187,3 +187,7 @@ table.tex
 /baselines
 /test/*
 .run/
+# 本线产物与编辑器目录（figs 剖面/图、logs 日志与 census csv、.vscode 编辑器状态）
+/figs/
+/logs/
+.vscode/
