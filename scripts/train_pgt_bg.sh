@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # train_pgt_bg.sh — 第一阶段 PGT（10 视角、全参数、400K 步）后台启动器
 #
-#   ./train_pgt_bg.sh probe 3               # 51 步探针：看显存/步速，约 10 分钟
-#   ./train_pgt_bg.sh start 3               # 单卡，1 x accum 4（与 Eco 完全一致）
-#   ./train_pgt_bg.sh start 3,6             # 双卡，每卡 1 x accum 2
-#   ./train_pgt_bg.sh start 3,6,4,2         # 四卡，每卡 1，不累积
-#   ./train_pgt_bg.sh sync                  # 每小时把新检查点推到对象存储（本地只留 3 个）
-#   ./train_pgt_bg.sh status                # 训练与同步是否在跑 + 最近两行进度
-#   ./train_pgt_bg.sh follow                # tail -f 训练日志
-#   ./train_pgt_bg.sh stop                  # 停训练与同步（整组信号）
+#   ./scripts/train_pgt_bg.sh probe 3               # 51 步探针：看显存/步速，约 10 分钟
+#   ./scripts/train_pgt_bg.sh start 3               # 单卡，1 x accum 4（与 Eco 完全一致）
+#   ./scripts/train_pgt_bg.sh start 3,6             # 双卡，每卡 1 x accum 2
+#   ./scripts/train_pgt_bg.sh start 3,6,4,2         # 四卡，每卡 1，不累积
+#   ./scripts/train_pgt_bg.sh sync                  # 每小时把新检查点推到对象存储（本地只留 3 个）
+#   ./scripts/train_pgt_bg.sh status                # 训练与同步是否在跑 + 最近两行进度
+#   ./scripts/train_pgt_bg.sh follow                # tail -f 训练日志
+#   ./scripts/train_pgt_bg.sh stop                  # 停训练与同步（整组信号）
 #
 # 有效 batch 固定为 4（每卡 micro-batch 1，靠 accumulate 补到 4），与
 # EcoSplat 的 10 视角配方一致；所以卡数只能取 4 的约数（1/2/4）。
@@ -17,7 +17,7 @@
 #           SYNC_REMOTE（rclone 目标，如 oss:ckpt/pgt_sg3_10v）/ SYNC_INTERVAL（秒，默认 3600）
 set -uo pipefail
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONDA_ENV="${CONDA_ENV:-ecosplat}"
 CONDA_SH="${CONDA_SH:-$HOME/miniconda3/etc/profile.d/conda.sh}"
 RUN_DIR="${RUN_DIR:-$REPO/.run}"

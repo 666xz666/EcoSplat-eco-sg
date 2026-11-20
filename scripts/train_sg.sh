@@ -2,10 +2,10 @@
 # Representation-swap experiments (eco-sg branch): train SG / SH1 / SH2 / SH4
 # variants with the identical heads-only recipe.
 #
-#   ./train_sg.sh sg3          # 3-lobe spherical Gaussians (main variant)
-#   ./train_sg.sh sh1          # SH degree 1 baseline
-#   ./train_sg.sh sh2          # SH degree 2 baseline
-#   ./train_sg.sh sh4          # SH degree 4, same-recipe reference
+#   ./scripts/train_sg.sh sg3          # 3-lobe spherical Gaussians (main variant)
+#   ./scripts/train_sg.sh sh1          # SH degree 1 baseline
+#   ./scripts/train_sg.sh sh2          # SH degree 2 baseline
+#   ./scripts/train_sg.sh sh4          # SH degree 4, same-recipe reference
 #
 # Notes:
 #   * No checkpointing.load/resume here: the encoder inits from

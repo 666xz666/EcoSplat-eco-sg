@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Evaluate an sg3_igf checkpoint (SG 3-lobe head + IGF) at a given rho.
-#   RHO=0.4 ./eval_igf_sg3_rho.sh
-#   RHO=0.02 CKPT=<igf_ckpt> BASE=<sg_base_ckpt> ./eval_igf_sg3_rho.sh
+#   RHO=0.4 ./scripts/eval_igf_sg3_rho.sh
+#   RHO=0.02 CKPT=<igf_ckpt> BASE=<sg_base_ckpt> ./scripts/eval_igf_sg3_rho.sh
 # NOTE: unlike eval_igf_rho0pXX.sh (stock SH4 base), this uses the SG experiment;
 # the encoder strict-loads BASE at init (IGF branch requirement) and Lightning
 # then restores the trained IGF weights from CKPT.

@@ -3,15 +3,15 @@
 # The checkpoint must be loaded with the SAME experiment config it was
 # trained with (head width differs per variant: sg3=32, sh1=20, sh2=35).
 #
-#   ./eval_sg.sh sg3 CKPT=outputs/.../checkpoint.ckpt
-#   ./eval_sg.sh sh1 CKPT=... EVAL_INDEX=assets/evaluation_index_acid.json
+#   ./scripts/eval_sg.sh sg3 CKPT=outputs/.../checkpoint.ckpt
+#   ./scripts/eval_sg.sh sh1 CKPT=... EVAL_INDEX=assets/evaluation_index_acid.json
 set -euo pipefail
 
 : "${CUDA_VISIBLE_DEVICES:=0}"
 export CUDA_DEVICE_ORDER="${CUDA_DEVICE_ORDER:-PCI_BUS_ID}"
 export CUDA_VISIBLE_DEVICES
 
-VARIANT="${1:?usage: ./eval_sg.sh sg3|sh1|sh2|sh4|<v>_igf (CKPT=... required)}"
+VARIANT="${1:?usage: ./scripts/eval_sg.sh sg3|sh1|sh2|sh4|<v>_igf (CKPT=... required)}"
 shift
 CKPT="${CKPT:?set CKPT=path/to/checkpoint.ckpt}"
 EVAL_INDEX="${EVAL_INDEX:-assets/evaluation_index_re10k.json}"

@@ -24,11 +24,11 @@
 # The rho_eff values for 10% and 40% are below the nominal column because
 # int(0.10 * 65536) = 6553 and int(0.40 * 65536) = 26214 truncate.
 #
-#   bash eval_budget_sg3_all.sh
-#   EVAL_INDEX=assets/evaluation_index_re10k_200.json bash eval_budget_sg3_all.sh
-#   RUNGS="0.15357142857142858" bash eval_budget_sg3_all.sh
+#   bash scripts/eval_budget_sg3_all.sh
+#   EVAL_INDEX=assets/evaluation_index_re10k_200.json bash scripts/eval_budget_sg3_all.sh
+#   RUNGS="0.15357142857142858" bash scripts/eval_budget_sg3_all.sh
 set -uo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 CKPT="${CKPT:-/data14T/xz/ckpt_archive/igf_budget_sg3_step30000.ckpt}"
 TAG="${TAG:-matched_sg3_30k}"
@@ -47,7 +47,7 @@ mkdir -p logs
 echo "[eval] start $(date +%F' '%T) ckpt=${CKPT} index=${EVAL_INDEX} census=${CENSUS}" | tee -a "${LOG}"
 for rv in ${RUNGS}; do
     echo "[eval] rho=${rv} start $(date +%F' '%T)" | tee -a "${LOG}"
-    if RHO="${rv}" CKPT="${CKPT}" TAG="${TAG}" bash eval_budget_sg3_rho.sh >> "${LOG}" 2>&1; then
+    if RHO="${rv}" CKPT="${CKPT}" TAG="${TAG}" bash scripts/eval_budget_sg3_rho.sh >> "${LOG}" 2>&1; then
         echo "[eval] rho=${rv} DONE rc=0 $(date +%F' '%T)" | tee -a "${LOG}"
     else
         echo "[eval] rho=${rv} FAILED rc=$? $(date +%F' '%T)" | tee -a "${LOG}"

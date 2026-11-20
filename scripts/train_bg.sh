@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 # train_bg.sh — 后台挂起训练（无 tmux 环境用 setsid + nohup）
 #
-#   ./train_bg.sh start sg3 2                    # 在 2 号卡后台训练 sg3
-#   ./train_bg.sh start sh1 3 trainer.max_steps=1001
-#   ./train_bg.sh start sg3 2 checkpointing.load=outputs/x/checkpoint.ckpt checkpointing.resume=true
-#   ./train_bg.sh status                         # 三个变体状态
-#   ./train_bg.sh logs sg3                       # 看日志末尾
-#   ./train_bg.sh follow sg3                     # 实时 tail -f
-#   ./train_bg.sh stop sg3
+#   ./scripts/train_bg.sh start sg3 2                    # 在 2 号卡后台训练 sg3
+#   ./scripts/train_bg.sh start sh1 3 trainer.max_steps=1001
+#   ./scripts/train_bg.sh start sg3 2 checkpointing.load=outputs/x/checkpoint.ckpt checkpointing.resume=true
+#   ./scripts/train_bg.sh status                         # 三个变体状态
+#   ./scripts/train_bg.sh logs sg3                       # 看日志末尾
+#   ./scripts/train_bg.sh follow sg3                     # 实时 tail -f
+#   ./scripts/train_bg.sh stop sg3
 #
 # 环境变量：CONDA_ENV(默认 ecosplat) / CONDA_SH / LOG_DIR / RUN_DIR
 set -uo pipefail
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONDA_ENV="${CONDA_ENV:-ecosplat}"
 CONDA_SH="${CONDA_SH:-$HOME/miniconda3/etc/profile.d/conda.sh}"
 RUN_DIR="${RUN_DIR:-$REPO/.run}"

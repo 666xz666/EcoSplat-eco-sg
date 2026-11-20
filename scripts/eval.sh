@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Evaluate an EcoSplat (SPFSplat base) checkpoint: novel-view synthesis + pose.
 # Required: CKPT. Optional: EVAL_INDEX, CUDA_VISIBLE_DEVICES.
-#   CKPT=path/to/checkpoint.ckpt ./eval.sh
+#   CKPT=path/to/checkpoint.ckpt ./scripts/eval.sh
 set -euo pipefail
 
 : "${CUDA_VISIBLE_DEVICES:=0}"

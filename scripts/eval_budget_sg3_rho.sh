@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Evaluate a budget-mode SG-3 IGF checkpoint at one total-payload rate.
 #
-#   RHO=0.15357142857142858 ./eval_budget_sg3_rho.sh
-#   RHO=0.9828421456473214 CKPT=/path/to.ckpt TAG=matched_sg3_30k ./eval_budget_sg3_rho.sh
+#   RHO=0.15357142857142858 ./scripts/eval_budget_sg3_rho.sh
+#   RHO=0.9828421456473214 CKPT=/path/to.ckpt TAG=matched_sg3_30k ./scripts/eval_budget_sg3_rho.sh
 #
 # RHO is read as a fraction of the full payload (35 floats per pixel: 14 per
 # point plus 7 per of 3 lobes), so the byte axis is 35*RHO floats per pixel.
