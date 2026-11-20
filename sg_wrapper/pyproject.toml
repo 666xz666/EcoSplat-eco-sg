@@ -14,3 +14,6 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 include = ["sg_wrapper*"]
+
+[tool.setuptools.package-data]
+sg_wrapper = ["cuda/*.cu"]

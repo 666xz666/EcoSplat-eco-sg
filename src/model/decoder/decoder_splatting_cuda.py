@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import os
 from typing import Literal
 
 import torch
@@ -79,7 +80,25 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
             gaussians = apply_runtime_lobe_budget(gaussians)
 
             _t_color = stage_prof.tick()
-            if getattr(gaussians, "sg_packed_directions", None) is not None:
+            # 显式启用独立颜色融合核；有梯度的姿态对齐仍必须走参考路径。
+            use_sg_cuda = (
+                os.environ.get("SG_COLOR_BACKEND", "torch") == "cuda"
+                and not self.training
+                and not torch.is_grad_enabled()
+                and gaussians.means.is_cuda
+                and gaussians.means.dtype == torch.float32
+                and getattr(gaussians, "sg_packed_directions", None) is None
+            )
+            if use_sg_cuda:
+                from sg_wrapper.sg_cuda import compute_sg_colors_cuda
+
+                sg_colors = compute_sg_colors_cuda(
+                    gaussians.means, gaussians.rgb_base,
+                    gaussians.sg_directions, gaussians.sg_sharpness,
+                    gaussians.sg_rgb, extrinsics,
+                    clamp_colors=getattr(gaussians, "clamp_colors", False),
+                )
+            elif getattr(gaussians, "sg_packed_directions", None) is not None:
                 sg_colors = compute_packed_sg_colors(
                     repeat(gaussians.means, "b g xyz -> (b v) g xyz", v=v),
                     repeat(gaussians.rgb_base, "b g c -> (b v) g c", v=v),
