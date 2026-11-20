@@ -26,6 +26,9 @@ INDEX=assets/evaluation_index_re10k_20.json
 PROF_DIR="${PROF_DIR:-/data14T/xz/figs/prof}"
 SKIP="${SKIP:-3}"
 ONLY="${ONLY:-sg3_34 sg3_4 eco_40}"
+# 位姿对齐开关：true 复现论文评测协议（每场景 ~100 次带梯度渲染，颜色核被稀释）；
+# false 度量无对齐推理，此时全部渲染走 no_grad、cuda 颜色核生效。
+ALIGN="${ALIGN:-true}"
 mkdir -p "${PROF_DIR}" logs
 
 # A twenty-scene slice keeps each run near three minutes once the kernels are
@@ -60,7 +63,7 @@ common=(
     dataset.re10k.view_sampler.index_path="${INDEX}"
     dataset.re10k.view_sampler.num_context_views=16
     test.save_image=false
-    test.align_pose=true
+    test.align_pose="${ALIGN}"
     test.compute_scores=true
 )
 

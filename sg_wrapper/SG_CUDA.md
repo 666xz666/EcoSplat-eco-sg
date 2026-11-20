@@ -28,3 +28,9 @@ python sg_wrapper/tests/test_sg_cuda.py
 第二条首次包含构建，由实验执行者手动运行。覆盖 L=0/1/3/6、多场景多相机、零方向、极小方向、相机与高斯重合、任意删除槽位、clamp、空点集、梯度拒绝和微型 gsplat RGB/depth/alpha 对拍。颜色与图像绝对容差 1e-5。
 
 通过后用同一 checkpoint、索引、预算、姿态对齐配置，分别设置 `SG_COLOR_BACKEND=torch` 与 `SG_COLOR_BACKEND=cuda` 跑现有评测。正式计时应先预热并完成 JIT，用 CUDA events 或同步计时；同时报告 sg_color、raster 和端到端时间。小样本对拍不代替 200 场景质量与性能验收。
+
+## 已测结果与适用边界
+
+数值对拍（`test_sg_cuda.py`，GPU0）已通过：颜色 L=0/1/3/6 最大误差 ≤1.2e-7，微型 gsplat RGB/depth/alpha 一致。生产形状微基准（`sg_dev/bench_sg_cuda.py`，no_grad，B1 V20 L3）：G=65536 时 torch 2.45ms → cuda 0.14ms（17.8×），G=14117 时 0.53ms → 0.02ms（22.1×）。
+
+适用边界：论文评测协议用 `align_pose=true`，每场景约 100 次带梯度位姿对齐渲染必须走 torch 可微路径，cuda 核只在 no_grad 打分渲染触发；因此 align_pose 剖面里 sg_color 总量几乎不变（实测 208.8→207.5 ms/帧，仅省打分那一次约 2ms）。本核的价值在无对齐部署推理（`profile_stages.sh` 设 `ALIGN=false`，全部渲染 no_grad，颜色核生效）与作为正确性无损的颜色实现，而非缩小 align_pose 评测的端到端时间差。无对齐端到端收益待 `ALIGN=false` 剖面量化。
