@@ -17,7 +17,7 @@ from typing import Optional
 import torch
 from torch import Tensor
 
-from .budget import allocate_by_price
+from .budget import allocate_by_price_batched
 
 
 @dataclass
@@ -51,56 +51,60 @@ def select_by_budget(opacity: Tensor, lobe_value: Tensor, kappa_per_view: int,
         :class:`BudgetSelection` with padded gather indices, a padding mask,
         and the lobe mask in the **original** lobe order (not the D-sorted one
         the allocator works in).
+
+    实现约定：所有视角一次进 ``allocate_by_price_batched``（R = B*V），整帧只
+    同步两次（``nmax`` 与统计量）；旧实现是逐视角循环 + 每步二分一次
+    ``.item()``，约 ``iters * B * V`` 次同步，实测 ~95 ms/帧。
     """
     b, v, p = opacity.shape
     L = int(lobe_value.shape[-1])
     lmax = L if lobes_per_point is None else max(0, min(int(lobes_per_point), L))
     device = opacity.device
+    r = b * v
 
-    rows: list[tuple[Tensor, Tensor, int, int, int, int, float]] = []
-    for bi in range(b):
-        for vi in range(v):
-            # 步骤 1：先按 D 降序排一次——分配器的档位计数默认「前排的 lobe
-            # 更值钱」，排序只服务这一条，最后会把 mask 散射回原始顺序。
-            d = lobe_value[bi, vi].float()
-            order = d.argsort(dim=1, descending=True)
-            d_sorted = d.gather(1, order)
-            alloc = allocate_by_price(
-                int(kappa_per_view), opacity[bi, vi].float(), d_sorted,
-                lobe_max=lmax, iters=iters,
-            )
-            # 步骤 2：散射回原始列序，调用方才能直接乘到颜色通道上；少这一步
-            # 会按排序后的列去剪 lobe，颜色就错位了。
-            keep = torch.zeros((p, L), dtype=torch.bool, device=device)
-            if lmax > 0:
-                keep.scatter_(1, order[:, :lmax], alloc.keep_lobes)
-            idx = alloc.keep_points.nonzero(as_tuple=False).squeeze(1)
-            rows.append((idx, keep[idx], alloc.n_points, alloc.n_lobes,
-                         alloc.achieved, alloc.target, alloc.beta))
+    # 步骤 1：整批按 D 降序排一次——分配器的档位计数默认「前排的 lobe
+    # 更值钱」，排序只服务这一条，最后会把 mask 散射回原始顺序。
+    d = lobe_value.reshape(r, p, L).float()
+    order = d.argsort(dim=2, descending=True)
+    d_sorted = d.gather(2, order)
+    alloc = allocate_by_price_batched(
+        int(kappa_per_view), opacity.reshape(r, p).float(), d_sorted,
+        lobe_max=lmax, iters=iters,
+    )
 
-    # 步骤 3：各视角保留数不同，gather 需要矩形索引，因此补到最大值；补进来
-    # 的槽位在 valid 里是 False，调用方把密度置零即可（不参与渲染）。
-    nmax = max(1, max(int(r[0].numel()) for r in rows))
-    index = torch.zeros((b, v, nmax), dtype=torch.long, device=device)
-    valid = torch.zeros((b, v, nmax), dtype=torch.bool, device=device)
-    keep_lobes = torch.zeros((b, v, nmax, L), dtype=torch.bool, device=device)
-    for k, (idx, keep, *_rest) in enumerate(rows):
-        n = int(idx.numel())
-        if n == 0:
-            continue
-        bi, vi = divmod(k, v)
-        index[bi, vi, :n] = idx
-        valid[bi, vi, :n] = True
-        keep_lobes[bi, vi, :n] = keep
+    # 步骤 2：散射回原始列序，调用方才能直接乘到颜色通道上；少这一步
+    # 会按排序后的列去剪 lobe，颜色就错位了。
+    keep = torch.zeros((r, p, L), dtype=torch.bool, device=device)
+    if lmax > 0:
+        keep.scatter_(2, order[:, :, :lmax], alloc.keep_lobes)
 
-    n_views = len(rows)
+    # 步骤 3：各视角保留数不同，gather 需要矩形索引，因此补到最大值。
+    # stable 降序 argsort 把 True 排到前面且保持索引升序，与旧实现的
+    # nonzero() 逐位一致；补进来的槽位在 valid 里是 False、不携带任何
+    # lobe，调用方把密度置零即可（不参与渲染）。
+    n_pts = alloc.n_points
+    nmax = max(1, int(n_pts.max()))
+    idx_all = alloc.keep_points.argsort(dim=1, descending=True, stable=True)
+    index = idx_all[:, :nmax]
+    valid = torch.arange(nmax, device=device)[None, :] < n_pts[:, None]
+    index = torch.where(valid, index, torch.zeros_like(index))
+    keep_lobes = keep.gather(1, index.unsqueeze(-1).expand(r, nmax, L)) \
+        & valid[..., None]
+
+    # 步骤 4：统计量一次同步取回。
+    stats = torch.stack([
+        n_pts.to(torch.float64).mean(),
+        alloc.n_lobes.to(torch.float64).mean(),
+        alloc.achieved.to(torch.float64).mean(),
+        alloc.beta.mean(),
+    ]).tolist()
     return BudgetSelection(
-        index=index,
-        valid=valid,
-        keep_lobes=keep_lobes,
-        n_points=sum(r[2] for r in rows) / n_views,
-        n_lobes=sum(r[3] for r in rows) / n_views,
-        achieved=sum(r[4] for r in rows) / n_views,
-        target=sum(r[5] for r in rows) / n_views,
-        beta=sum(r[6] for r in rows) / n_views,
+        index=index.reshape(b, v, nmax),
+        valid=valid.reshape(b, v, nmax),
+        keep_lobes=keep_lobes.reshape(b, v, nmax, L),
+        n_points=stats[0],
+        n_lobes=stats[1],
+        achieved=stats[2],
+        target=float(alloc.target),
+        beta=stats[3],
     )
