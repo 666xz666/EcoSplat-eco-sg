@@ -1,9 +1,10 @@
-"""固定场景几何，测量 SH4、SG-3 和预存 RGB 的单帧渲染开销。"""
+"""固定视点和场景几何，测量高斯数与颜色容量对单帧渲染的影响。"""
 
 from __future__ import annotations
 
 import argparse
 from collections import defaultdict
+from collections.abc import Iterator
 from contextlib import ExitStack
 import functools
 import json
@@ -22,7 +23,8 @@ from torch import Tensor
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "sg_wrapper"))
 from sg_wrapper.sg_colors import C0, compute_sg_colors
 
-COLOR_DIMS = {"SH4": 75, "SG-3": 24, "RGB/DC": 3}
+GAUSSIAN_FIELDS = ("means", "quats", "scales", "opacities")
+DEFAULT_LOBES = (3, 0)
 KERNELS = {
     "fully_fused_projection": "project",
     "spherical_harmonics": "color",
@@ -71,64 +73,78 @@ def load_geometry(path: Path, size: int) -> tuple[dict, Tensor, Tensor]:
         "opacities": gpu(np.array(vertices["opacity"], copy=True)),
         "viewmats": torch.linalg.inv(extrinsics), "Ks": intrinsics, "height": size, "width": size,
     }
-    for tensor in (scene["means"], scene["quats"], scene["scales"], scene["opacities"]):
-        if not torch.isfinite(tensor).all():
+    for field in GAUSSIAN_FIELDS:
+        if not torch.isfinite(scene[field]).all():
             raise ValueError(f"non-finite scene geometry: {path}")
     if not bool(((0 <= scene["opacities"]) & (scene["opacities"] <= 1)).all()):
         raise ValueError(f"unexpected opacity convention: {path}")
     return scene, gpu(columns("f_dc_0", "f_dc_1", "f_dc_2")), extrinsics
 
 
-def color_parameters(c0: Tensor) -> dict:
-    """为相同基础颜色构造三档 FP32 张量，方向项用固定随机种子产生。
+def color_parameters(c0: Tensor, lobe_counts: tuple[int, ...]) -> dict:
+    """用固定随机种子生成方向项，较小瓣数使用同一组参数的前缀。
 
     Args:
         c0 (Tensor, "gaussian 3"): PLY 的原始 SH DC 系数。
+        lobe_counts (tuple[int, ...]): 每颗高斯实际存储的瓣数，0 对应直接传入 RGB。
 
     Returns:
-        dict: SH (G, 25, 3)，SG (G, 3)、(G, 3, 3)、(G, 3, 1)、(G, 3, 3)，RGB (G, 3)。
+        dict: 颜色路径名到实际瓣数（SH4 为 None）和对应输入张量的映射。
     """
     count = len(c0)
     generator = torch.Generator(device=c0.device).manual_seed(23)
     rand = functools.partial(torch.randn, device=c0.device, generator=generator)
     sh = torch.cat((c0[:, None], rand(count, 24, 3) * 0.025), dim=1)
-    directions = torch.nn.functional.normalize(rand(count, 3, 3), dim=-1)
-    sharpness = rand(count, 3, 1).abs() + 0.5
-    amplitudes = rand(count, 3, 3) * 0.05
-    return {"SH4": (sh,), "SG-3": (c0, directions, sharpness, amplitudes),
-            "RGB/DC": (c0 * C0 + 0.5,)}
+    max_lobes = max(lobe_counts)
+    directions = torch.nn.functional.normalize(rand(count, max_lobes, 3), dim=-1)
+    sharpness = rand(count, max_lobes, 1).abs() + 0.5
+    amplitudes = rand(count, max_lobes, 3) * 0.05
+
+    variants = {"SH4": (None, (sh,))}
+    for lobes in lobe_counts:
+        if lobes == 0:
+            variants["RGB/DC"] = (0, (c0 * C0 + 0.5,))
+        else:
+            params = (directions, sharpness, amplitudes)
+            variants[f"SG-{lobes}"] = (lobes, (c0, *(t[:, :lobes].contiguous() for t in params)))
+    return variants
 
 
-def measure_scene(path: Path, size: int, repeats: int) -> dict:
-    """交错测量同个场景上的三条渲染路径并核验可见集和覆盖一致。
+def measure_scene(scene: dict, color: dict, extrinsics: Tensor, label: str, repeats: int) -> dict:
+    """交错测量同场景同点数的颜色路径，并核验可见集和覆盖一致。
 
     Args:
-        path (Path): 要复用的同场景几何。
-        size (int): 渲染分辨率。
-        repeats (int): 每条路径的整体和分段重复数。
+        scene (dict): 已选定的 gsplat 几何张量、相机和图像大小。
+        color (dict): 各颜色路径的实际瓣数和输入张量。
+        extrinsics (Tensor, "1 4 4"): 相机到世界变换。
+        label (str): 用于定位失败样本的场景和点数。
+        repeats (int): 整体和分段计时各自重复的次数。
 
     Returns:
         dict: 可见高斯、tile 相交数、逐次耗时及额外显存峰值。
     """
     from gsplat import rendering
 
-    scene, c0, extrinsics = load_geometry(path, size)
-    color = color_parameters(c0)
-    count = len(c0)
+    count = len(scene["means"])
     outputs = {}
-    for name, tensors in color.items():
+    for name, (lobes, tensors) in color.items():
+        color_dims = 75 if lobes is None else 3 + 7 * lobes
         color_bytes = sum(tensor.numel() * tensor.element_size() for tensor in tensors)
-        assert color_bytes == 4 * COLOR_DIMS[name] * count
-        outputs[name] = {"wall_ms": [], "gpu_ms": [], "events": [], "color_bytes": color_bytes}
+        assert color_bytes == 4 * color_dims * count
+        outputs[name] = {
+            "wall_ms": [], "gpu_ms": [], "events": [], "color_bytes": color_bytes,
+            "lobes_per_gaussian": lobes, "total_sg_lobes": None if lobes is None else lobes * count,
+        }
 
     def render(name, invoke):
-        if name == "SG-3":
-            args = (scene["means"][None], *(x[None] for x in color[name]), extrinsics)
+        lobes, tensors = color[name]
+        if lobes:
+            args = (scene["means"][None], *(x[None] for x in tensors), extrinsics)
             colors = invoke("color", compute_sg_colors, *args).squeeze(0)
         else:
-            colors = color[name][0]
-        return rendering.rasterization(
-            **scene, colors=colors, sh_degree=4 if name == "SH4" else None,
+            colors = tensors[0]
+        return invoke(
+            "raster", rendering.rasterization, **scene, colors=colors, sh_degree=4 if name == "SH4" else None,
             render_mode="RGB+D", packed=False, radius_clip=0.1,
             near_plane=0.01, far_plane=100.0, tile_size=16,
         )
@@ -142,13 +158,13 @@ def measure_scene(path: Path, size: int, repeats: int) -> dict:
         for _ in range(3):
             frame, alpha, meta = render(name, direct)
         if not torch.isfinite(frame).all():
-            raise ValueError(f"non-finite output: {path} {name}")
+            raise ValueError(f"non-finite output: {label} {name}")
         radii = meta["radii"]
         if radii.ndim == 3:
             radii = radii.amax(-1)
         coverage = (int((radii > 0).sum()), int(meta["isect_ids"].numel()))
         if coverage[0] == 0 or coverage[1] == 0 or (reference is not None and coverage != reference):
-            raise ValueError(f"invalid or mismatched coverage: {path} {name} {coverage} {reference}")
+            raise ValueError(f"invalid or mismatched coverage: {label} {name} {coverage} {reference}")
         reference = coverage
         del frame, alpha, meta, radii
 
@@ -191,8 +207,14 @@ def measure_scene(path: Path, size: int, repeats: int) -> dict:
                 }
                 if ("color" in values) != (name != "RGB/DC"):
                     raise RuntimeError(f"color stage was not measured correctly: {name}")
-                if not {"project", "tile_intersect_sort", "composite"} <= values.keys():
+                required = set(KERNELS.values()) - {"color"}
+                if not required <= values.keys():
                     raise RuntimeError(f"missing rasterization stages: {name}")
+
+                # 光栅调用首尾与首个投影、末次合成对齐，独立记录输入及输出整理。
+                raster_start, raster_stop = events["raster"][0]
+                values["raster_input"] = raster_start.elapsed_time(events["project"][0][0])
+                values["raster_output"] = events["composite"][-1][1].elapsed_time(raster_stop)
                 outputs[name]["events"].append(values)
 
     # 参数输入都提前就位。额外峰值单独测量，避免把其他变体的驻留张量算进差值。
@@ -203,8 +225,45 @@ def measure_scene(path: Path, size: int, repeats: int) -> dict:
         render(name, direct)
         torch.cuda.synchronize()
         outputs[name]["peak_extra_bytes"] = torch.cuda.max_memory_allocated() - initial
-    return {"geometry": path.parent.name, "size": size, "count": count,
-            "visible": reference[0], "tile_intersections": reference[1], "methods": outputs}
+    return {"visible": reference[0], "tile_intersections": reference[1], "methods": outputs}
+
+
+def selected_scenes(
+    path: Path, size: int, counts: list[int] | None, lobe_counts: tuple[int, ...],
+) -> Iterator[tuple[int, dict, dict, Tensor]]:
+    """从一次读入的场景生成相机固定、几何逐档嵌套的测试输入。
+
+    Args:
+        path (Path): 场景 PLY。
+        size (int): 所有档位的渲染边长。
+        counts (list[int] | None): 待测点数。省略时保留全场景。
+        lobe_counts (tuple[int, ...]): 每颗高斯的待测瓣数。
+
+    Returns:
+        Iterator: 逐档产出点数、gsplat 几何、颜色参数和相机外参。
+    """
+    scene, c0, extrinsics = load_geometry(path, size)
+    full_count = len(c0)
+    if counts and max(counts) > full_count:
+        raise ValueError(f"{path} contains {full_count} Gaussians, requested {max(counts)}")
+
+    # 步骤1：整场生成一次颜色。不同点数或瓣数共享已有高斯上的已有系数。
+    color = color_parameters(c0, lobe_counts)
+    if counts is None:
+        yield full_count, scene, color, extrinsics
+        return
+
+    # 步骤2：随机排列产生嵌套子集，避免 PLY 的视图顺序影响小档位的空间分布。
+    generator = torch.Generator(device="cpu").manual_seed(23)
+    order = torch.randperm(full_count, generator=generator).to(c0.device)
+    for count in counts:
+        indices = order[:count].sort().values
+        subset = scene | {field: scene[field].index_select(0, indices) for field in GAUSSIAN_FIELDS}
+        subset_color = {
+            name: (lobes, tuple(t.index_select(0, indices) for t in tensors))
+            for name, (lobes, tensors) in color.items()
+        }
+        yield count, subset, subset_color, extrinsics
 
 
 def main() -> None:
@@ -215,26 +274,49 @@ def main() -> None:
     parser.add_argument("--ply-root", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--repeats", default=12, type=int)
+    parser.add_argument("--counts", nargs="+", type=int, help="Keep these nested Gaussian counts.")
+    parser.add_argument("--lobes", nargs="+", choices=range(4), type=int, default=DEFAULT_LOBES)
+    parser.add_argument("--render-size", type=int, help="Override the source-specific render size.")
+    parser.add_argument("--scene-prefix", default="", help="Only use PLY directories with this prefix.")
     args = parser.parse_args()
     if args.repeats < 1:
         parser.error("--repeats must be positive")
-    paths = sorted(args.ply_root.glob("*/scene.ply"))
+    if args.render_size is not None and args.render_size < 1:
+        parser.error("--render-size must be positive")
+    if args.counts is not None and (min(args.counts) < 1 or len(set(args.counts)) != len(args.counts)):
+        parser.error("--counts must contain unique positive integers")
+    if len(set(args.lobes)) != len(args.lobes):
+        parser.error("--lobes must contain unique integers")
+    paths = sorted(
+        path for path in args.ply_root.glob("*/scene.ply")
+        if path.parent.name.startswith(args.scene_prefix)
+    )
     if not paths:
         raise ValueError(f"no scene.ply files in {args.ply_root}")
     torch.set_num_threads(4)
     worktree = Path(__file__).resolve().parents[1]
     revision = subprocess.check_output(["git", "-C", str(worktree), "rev-parse", "HEAD"], text=True).strip()
-    result = {"gpu": torch.cuda.get_device_name(0), "torch": torch.__version__,
-              "gsplat": gsplat_version, "repeats": args.repeats, "script_commit": revision, "cases": []}
+    counts = sorted(args.counts) if args.counts is not None else None
+    lobes = tuple(args.lobes)
+    result = {
+        "gpu": torch.cuda.get_device_name(0), "torch": torch.__version__, "gsplat": gsplat_version,
+        "repeats": args.repeats, "script_commit": revision, "counts": counts, "lobes": lobes,
+        "input_ply_root": str(args.ply_root.resolve()), "cases": [],
+    }
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = args.output.with_suffix(args.output.suffix + ".tmp")
+    print("PROFILE_START", "scenes", len(paths), "counts", counts, "lobes", lobes, flush=True)
     with torch.inference_mode():
         for path in paths:
-            print("CASE_START", path.parent.name, flush=True)
-            size = int(path.parent.name.split("_", 1)[0])
-            result["cases"].append(measure_scene(path, size, args.repeats))
-            temporary = args.output.with_suffix(".tmp")
-            temporary.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
-            temporary.replace(args.output)
-            print("CASE_DONE", path.parent.name, flush=True)
+            label = path.parent.name
+            size = args.render_size if args.render_size else int(label.split("_", 1)[0])
+            for count, scene, color, extrinsics in selected_scenes(path, size, counts, lobes):
+                print("CASE_START", label, "gaussians", count, flush=True)
+                measurements = measure_scene(scene, color, extrinsics, f"{label}/{count}", args.repeats)
+                result["cases"].append({"geometry": label, "size": size, "count": count, **measurements})
+                temporary.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+                temporary.replace(args.output)
+                print("CASE_DONE", label, "gaussians", count, flush=True)
     print("COLOR_PROFILE_COMPLETE", args.output, flush=True)
 
 
