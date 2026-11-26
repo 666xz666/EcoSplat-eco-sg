@@ -19,7 +19,7 @@ def view_support(model, native):
     """用光栅化的射线深度分散度估计源测量可归因性和目标的测量需求。"""
     camera = reduced(native, 108)
     _, opacity, meta = model.render(camera, model.opacity[:, None])
-    pixels, splats, alpha, cumulative, _ = ordered_alpha_samples(meta, camera.width, camera.height)
+    pixels, splats, alpha, cumulative, total = ordered_alpha_samples(meta, camera.width, camera.height)
     weight = alpha * torch.exp(-(cumulative + torch.log1p(-alpha))).to(alpha.dtype)
     z = meta["depths"][0, splats]
     moments = weight.new_zeros((camera.width * camera.height, 2))
@@ -32,7 +32,51 @@ def view_support(model, native):
                             normalized * (.03 + spread)), dim=-1)
     totals = weight.new_zeros((len(model.xyz), 3))
     totals.index_add_(0, splats, evidence)
-    return totals
+    # 同一排序内读取三个分位数，避免再次光栅化，并保留多表面射线的差异。
+    accumulated = -torch.expm1(-cumulative)
+    percentiles = z.new_tensor([.25, .5, .75])
+    size = camera.width * camera.height
+    output = torch.full((size, 3), torch.inf, device=z.device)
+    output.scatter_reduce_(0, pixels[:, None].expand(-1, 3),
+                           torch.where(accumulated[:, None] >= total[:, None] * percentiles, z[:, None], torch.inf),
+                           reduce="amin", include_self=True)
+    return totals, (camera, output, opacity.flatten() > .5)
+
+
+def range_scores(source, target):
+    """估计候选测深能够命中目标相机三个可信表面假设的程度。
+
+    Args:
+        source (tuple): 候选相机、(H_s * W_s, 3) 深度分位数、有效掩码。
+        target (tuple): 查询相机、(H_t * W_t, 3) 深度分位数、有效掩码。
+
+    Returns:
+        Tensor: 目标像素的预测测量覆盖，形状 (H_t * W_t,)。
+    """
+    a, source_depths, source_valid = source
+    b, target_depths, target_valid = target
+    flat = torch.arange(len(target_depths), device=target_depths.device)
+    bx, by = b.intrinsic[0, 2], b.intrinsic[1, 2]
+    bfx, bfy = b.intrinsic.diagonal()[:2]
+    x = (flat % b.width - bx) / bfx
+    y = (flat // b.width - by) / bfy
+    rays = torch.stack((x, y, torch.ones_like(x)), dim=-1)
+    depth = torch.where(target_valid[:, None], target_depths, 0.)
+    transform = np.linalg.inv(a.c2w) @ b.c2w
+    transform = torch.as_tensor(transform, device=depth.device, dtype=depth.dtype)
+    xyz = (rays[:, None, :] * depth[..., None]) @ transform[:3, :3].T + transform[:3, 3]
+    z = xyz[..., 2]
+    cx, cy = a.intrinsic[0, 2], a.intrinsic[1, 2]
+    fx, fy = a.intrinsic.diagonal()[:2]
+    u = (xyz[..., 0] / z.clamp_min(.1) * fx + cx).round().long()
+    v = (xyz[..., 1] / z.clamp_min(.1) * fy + cy).round().long()
+    hit = (z > .1) & (u >= 0) & (u < a.width) & (v >= 0) & (v < a.height)
+    index = v.clamp(0, a.height - 1) * a.width + u.clamp(0, a.width - 1)
+    center = source_depths[index, 1]
+    width = (source_depths[index, 2] - source_depths[index, 0]).clamp(0., .35)
+    confidence = torch.exp(-((center - z).abs() + .35 * width) / (.08 + .04 * z.clamp_min(.1)))
+    confidence = torch.where(hit & source_valid[index] & target_valid[:, None], confidence, 0.)
+    return confidence @ confidence.new_tensor([.25, .5, .25])
 
 
 def facility(scores, weight, total):
@@ -99,8 +143,10 @@ def main():
     pool = list(range(args.phase, len(camera), 2))
     query = list(range(1 - args.phase, len(camera), 2))
     query = [query[i] for i in np.rint(np.linspace(0, len(query) - 1, 5)).astype(int)]
-    candidates = torch.stack([view_support(model, camera[i]) for i in pool])
-    targets = torch.stack([view_support(model, camera[i]) for i in query]).mean(0)
+    source_views = [view_support(model, camera[i]) for i in pool]
+    target_views = [view_support(model, camera[i]) for i in query]
+    candidates = torch.stack([stats for stats, _ in source_views])
+    targets = torch.stack([stats for stats, _ in target_views]).mean(0)
     pixels = reduced(camera[pool[0]], 108)
     scale = .65 * pixels.width * pixels.height
     poses = pose_scores([camera[i] for i in pool], [camera[i] for i in query], model.xyz.device)
@@ -111,6 +157,9 @@ def main():
         "gauss_visibility_cover": facility(-torch.expm1(-scale * candidates[:, :, 0]), targets[:, 0], total),
         "attribution_cover": facility(-torch.expm1(-scale * candidates[:, :, 1]), targets[:, 2], total),
     }
+    by_ray = torch.stack([torch.cat([range_scores(a, b) for _, b in target_views])
+                          for _, a in source_views])
+    picks["metric_surface_cover"] = facility(by_ray, torch.ones_like(by_ray[0]), total)
     print("Camera selection complete without sensor evidence", flush=True)
     cached = {}
     result = {"scene": args.scene, "pool_frames": [int(frames[i]) for i in pool],
