@@ -63,17 +63,16 @@ class FrozenGaussians:
         )
 
 
-def opacity_quantiles(metadata, width, height, probabilities=(0.1, 0.5, 0.9)):
-    """从同一次 3DGS 渲染的贡献列表计算归一化 alpha 深度分位数。
+def ordered_alpha_samples(metadata, width, height):
+    """返回固定光栅顺序的像素与高斯贡献。
 
     Args:
         metadata (dict): 单相机、未打包的 gsplat 投影结果。
         width (int): 像素宽度。
         height (int): 像素高度。
-        probabilities (tuple): 累积可见 alpha 的分位点。
 
     Returns:
-        ndarray: (len(probabilities), H, W)，无贡献像素为 NaN。
+        tuple: 每条贡献的像素索引、高斯索引、alpha、累计光学厚度和整条射线 alpha，均为 (M,)。
     """
     means = metadata["means2d"]
     conics = metadata["conics"]
@@ -89,7 +88,8 @@ def opacity_quantiles(metadata, width, height, probabilities=(0.1, 0.5, 0.9)):
         width, height, tile, offsets, flat,
     )
     if not gaussians.numel():
-        return np.full((len(probabilities), height, width), np.nan, dtype=np.float32)
+        empty = means.new_empty(0)
+        return pixels.long(), gaussians.long(), empty, empty, empty
     rank = torch.empty(len(depths), dtype=torch.int64, device=depths.device)
     rank[depths.argsort(stable=True)] = torch.arange(len(depths), dtype=torch.int64, device=depths.device)
     ordered = (pixels.long() * len(depths) + rank[gaussians.long()]).argsort()
@@ -110,6 +110,25 @@ def opacity_quantiles(metadata, width, height, probabilities=(0.1, 0.5, 0.9)):
     offset = prefix[start] - thickness[start]
     cumulative = prefix - offset.repeat_interleave(count)
     total_alpha = (-torch.expm1(-(prefix[end] - offset))).repeat_interleave(count)
+    return pixels, gaussians, alpha, cumulative, total_alpha
+
+
+def opacity_quantiles(metadata, width, height, probabilities=(0.1, 0.5, 0.9)):
+    """从同一次 3DGS 渲染的贡献列表计算归一化 alpha 深度分位数。
+
+    Args:
+        metadata (dict): 单相机、未打包的 gsplat 投影结果。
+        width (int): 像素宽度。
+        height (int): 像素高度。
+        probabilities (tuple): 累积可见 alpha 的分位点。
+
+    Returns:
+        ndarray: (len(probabilities), H, W)，无贡献像素为 NaN。
+    """
+    pixels, gaussians, _, cumulative, total_alpha = ordered_alpha_samples(metadata, width, height)
+    if not gaussians.numel():
+        return np.full((len(probabilities), height, width), np.nan, dtype=np.float32)
+    depths = metadata["depths"][0]
     point_depth = depths[gaussians]
     quantiles = []
     for probability in probabilities:
