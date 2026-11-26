@@ -44,10 +44,10 @@ def heldout_views(prepared, load, count):
         yield cameras[i], int(frame), cv2.cvtColor(observed, cv2.COLOR_BGR2RGB)
 
 
-def variants(renderer):
+def variants(renderer, ssaa_scales):
     """枚举基本合成、选择性与整图高采样，各点均执行真正的 GPU 渲染。"""
     configs = {}
-    for scale in SSAA:
+    for scale in ssaa_scales:
         configs[f"ssaa_{scale:g}"] = ("ssaa", scale, partial(renderer.supersample, scale))
     configs["gaussian_blending"] = ("gaussian_blending", None, renderer.gaussian_blending)
     for fraction in ADAPTIVE:
@@ -110,14 +110,36 @@ def reference_edge(reference):
     return gradient >= torch.quantile(gradient, .8)
 
 
-def measure(model, pose, photo, width, height, order, repetitions, seed):
+def profile_adaptive(renderer, repeats):
+    """用与正常帧相同的 CUDA 路径测试选择性 25% 档的分段延迟。"""
+    ext = adaptive_extension()
+    marks = []
+    for _ in range(repeats):
+        events = [torch.cuda.Event(enable_timing=True) for _ in range(5)]
+        events[0].record()
+        frame = renderer.project()
+        events[1].record()
+        image, scores = ext.render_base(*frame, renderer.w, renderer.h, False)
+        events[2].record()
+        selected = torch.topk(scores, round(.25 * renderer.tiles), sorted=False).indices
+        events[3].record()
+        ext.render_selected(*frame, selected, image, renderer.w, renderer.h)
+        events[4].record()
+        marks.append(events)
+    torch.cuda.synchronize()
+    names = ("projection_sort_and_sh", "coarse_render_and_score", "tile_selection", "selected_four_samples")
+    return {name: statistics.median(events[i].elapsed_time(events[i + 1]) for events in marks)
+            for i, name in enumerate(names)}
+
+
+def measure(model, pose, photo, width, height, order, repetitions, seed, ssaa_scales, stages):
     """为一张相机输出各实际渲染的延迟分布与画质。"""
     renderer = Renderer(model, View.from_camera(pose, width, height, model.xyz.device))
     real = torch.as_tensor(cv2.resize(photo, (width, height), interpolation=cv2.INTER_AREA),
                            dtype=torch.float32, device=model.xyz.device) / 255
     ref = renderer.reference(order).clamp(0, 1)
     edge = reference_edge(ref)
-    configs = variants(renderer)
+    configs = variants(renderer, ssaa_scales)
     latencies, wall = latency(configs, repetitions, seed)
     results = {}
     for name, (family, setting, operation) in configs.items():
@@ -130,7 +152,8 @@ def measure(model, pose, photo, width, height, order, repetitions, seed):
             "family": family, "setting": setting, "median_ms": statistics.median(times),
             "p90_ms": float(np.quantile(times, .9)), "durations_ms": times, **scores,
         }
-    return results, wall
+    profile = profile_adaptive(renderer, repetitions) if stages else None
+    return results, wall, profile
 
 
 def synthetic_check():
@@ -179,7 +202,12 @@ def main():
     parser.add_argument("--order", type=int, default=6)
     parser.add_argument("--sizes", nargs="+", type=float, default=(.5, 1.))
     parser.add_argument("--smoke", action="store_true")
+    parser.add_argument("--ssaa-scales", nargs="+", type=float, default=SSAA)
+    parser.add_argument("--profile-stages", action="store_true")
     args = parser.parse_args()
+    ssaa_scales = sorted(set(args.ssaa_scales) | {1., 2.})
+    if not all(np.isfinite(rate) and 1. <= rate <= 6. for rate in ssaa_scales):
+        parser.error("--ssaa-scales must be finite and between 1 and 6")
     cv2.setNumThreads(2)
     torch.set_num_threads(2)
     tests = synthetic_check()
@@ -194,6 +222,7 @@ def main():
             "type": "settings", "scenes": args.scenes, "sizes": args.sizes, "views": args.views,
             "order": args.order, "repetitions": args.repetitions, "epsilon": RAW_EPSILON, "tests": tests,
             "device": torch.cuda.get_device_name(), "torch": torch.__version__,
+            "ssaa_scales": ssaa_scales, "profile_stages": args.profile_stages,
         }) + "\n")
         for name in args.scenes:
             prepared, checkpoint, load = scene_paths(args.data, args.checkpoints, name)
@@ -203,9 +232,13 @@ def main():
             for size in args.sizes:
                 for camera, frame, photo in cameras:
                     width, height = round(size * camera.width), round(size * camera.height)
-                    results, elapsed = measure(model, camera, photo, width, height, args.order, args.repetitions, frame)
+                    results, elapsed, stages = measure(
+                        model, camera, photo, width, height, args.order, args.repetitions, frame,
+                        ssaa_scales, args.profile_stages,
+                    )
                     record = {"type": "view", "scene": name, "scale": size, "frame": frame,
-                              "size": [width, height], "measurements": results, "measurement_wall_seconds": elapsed}
+                              "size": [width, height], "measurements": results, "measurement_wall_seconds": elapsed,
+                              "adaptive_stage_ms": stages}
                     sink.write(json.dumps(record, allow_nan=False) + "\n")
                     sink.flush()
                     print(f"{name} frame {frame} {width}x{height}: {elapsed:.1f}s, GB "
