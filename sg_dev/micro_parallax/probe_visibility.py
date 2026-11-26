@@ -48,8 +48,12 @@ def evidence(source, target, source_ray, target_ray):
     front = np.zeros_like(z_center)
     hit = np.zeros_like(z_center)
     target_only = None
+    target_same = None
+    positions = {}
     for index, candidate in enumerate(source_depth):
         uv, z = project_between_cameras(candidate, source, target)
+        if index in (1, 3):
+            positions[index] = uv
         y, x, inside = projected_samples(uv, target)
         target_z = target_depth[:, y, x]
         tol = np.maximum(.025, .025 * z)
@@ -66,13 +70,16 @@ def evidence(source, target, source_ray, target_ray):
         hit += QUANTILE_WEIGHTS[index] * same_surface * match
         if index == 2:
             target_only = forward
+            target_same = same_surface
     good = np.isfinite(source_depth[2]) & (source_alpha > .25)
     spread = np.log(source_depth[-1] / source_depth[0])
     scores = {
         "median_signed": signed,
         "source_alpha_width": source_alpha * np.exp(-spread),
         "median_cycle": -cycle,
+        "median_envelope": -np.hypot(cycle, np.linalg.norm(positions[1] - positions[3], axis=-1)),
         "target_distribution": target_only,
+        "single_ray_joint": target_same,
         "two_ray_visibility": front,
         "two_ray_joint": hit,
     }
@@ -96,6 +103,7 @@ def rank_metrics(labels, scores):
         "ap": float(np.sum(np.diff(recall, prepend=0) * precision)),
         "roc_auc": float(np.sum(np.diff(fpr, prepend=0) * (recall + np.r_[0, recall[:-1]]) / 2)),
         "fpr_at_90_recall": float(fpr[np.searchsorted(recall, .9)]),
+        "error_at_50_coverage": float(1 - labels[order[:len(labels) // 2]].mean()),
         "positives": int(positives), "negatives": int(negatives),
     }
 
@@ -120,6 +128,26 @@ def compare(source, target, source_truth, target_truth, source_ray, target_ray):
     }
 
 
+def disjoint_pairs(cameras, original):
+    """以位姿选取两端均从未进入初始验证的留出相机对。"""
+    used = {i for a, b, _ in original for i in (a, b)}
+    available = [i for i in range(len(cameras)) if i not in used]
+    for i in available:
+        options = []
+        a = cameras[i].c2w
+        for j in available:
+            if i == j:
+                continue
+            b = cameras[j].c2w
+            distance = float(np.linalg.norm(a[:3, 3] - b[:3, 3]))
+            overlap = float(a[:3, 2] @ b[:3, 2])
+            if .15 <= distance <= 1.65 and overlap >= .5:
+                options.append((abs(distance - .65) + .35 * (1 - overlap), j, distance))
+        if options:
+            _, j, distance = min(options)
+            yield i, j, distance
+
+
 @torch.inference_mode()
 def main():
     """在冻结模型上运行预留相机对的遮挡及可用对应检验。"""
@@ -127,17 +155,23 @@ def main():
     parser.add_argument("--replica", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--disjoint-pairs", action="store_true")
     args = parser.parse_args()
     cv2.setNumThreads(2)
     model = FrozenGaussians.load(args.checkpoint)
     cameras, truth, frames = load_replica(args.replica)
     pairs = list(evaluation_pairs(cameras))
+    if args.disjoint_pairs:
+        pairs = list(disjoint_pairs(cameras, pairs))
+    if not pairs:
+        raise ValueError("No eligible camera pairs")
     rays = {i: ray_depths(model, cameras[i]) for i in sorted({i for a, b, _ in pairs for i in (a, b)})}
     result = [{"source": frames[i], "target": frames[j], "baseline": baseline,
                "scores": compare(cameras[i], cameras[j], truth[i], truth[j], rays[i], rays[j])}
               for i, j, baseline in pairs]
     with args.output.open("x", encoding="utf-8") as sink:
-        json.dump({"scene": args.replica.name, "pairs": result}, sink, allow_nan=False)
+        json.dump({"scene": args.replica.name, "disjoint_pairs": args.disjoint_pairs,
+                   "pairs": result}, sink, allow_nan=False)
     print(f"{args.replica.name}: {len(result)} pairs complete", flush=True)
 
 
