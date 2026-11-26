@@ -7,6 +7,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
+from scipy.ndimage import distance_transform_edt
+from scipy.spatial import cKDTree
 
 from bench_adaptive_raster import scene_paths
 from probe_depth_repair import depth_targets
@@ -97,7 +99,38 @@ def sensor_reprojection(camera, world):
     return output
 
 
-def metrics(model, camera, depth, sources, solution):
+def nearest_surface(camera, estimate, index):
+    """用世界坐标最近测深点作为独立于高斯归因的校准基线。"""
+    idx = torch.arange(len(estimate), device=estimate.device)
+    fx, fy = camera.intrinsic.diagonal()[:2]
+    cx, cy = camera.intrinsic[:2, 2]
+    x = (idx % camera.width - cx) / fx
+    y = (idx // camera.width - cy) / fy
+    local = torch.stack((x, y, torch.ones_like(x)), dim=-1) * estimate[:, None]
+    pose = torch.as_tensor(camera.c2w.copy(), device=local.device, dtype=local.dtype)
+    world = local @ pose[:3, :3].T + pose[:3, 3]
+    distance, neighbor = index.query(world.cpu().numpy(), distance_upper_bound=.25, workers=2)
+    near = torch.as_tensor(np.isfinite(distance), device=world.device)
+    neighbor = np.minimum(neighbor, len(index.data) - 1)
+    reference = torch.as_tensor(index.data[neighbor], dtype=world.dtype, device=world.device)
+    z = (reference - pose[:3, 3]) @ pose[:3, 2]
+    return torch.where(near, z, estimate)
+
+
+def local_sensor_fill(camera, source_depth, guide):
+    """在深度连续区域补齐重投影的栅格孔洞，返回距最近测深的像素距离。"""
+    absent = ~source_depth.reshape(camera.height, camera.width).isfinite()
+    if bool(absent.all()):
+        return source_depth, torch.full_like(guide, torch.inf)
+    distance, index = distance_transform_edt(absent.cpu().numpy(), return_indices=True)
+    distance = torch.as_tensor(distance.ravel(), device=guide.device, dtype=guide.dtype)
+    index = torch.as_tensor((index[0] * camera.width + index[1]).ravel().copy(), device=guide.device)
+    accept = (distance <= 4) & ((guide[index] - guide).abs() <= .10)
+    fill = torch.where(accept, source_depth[index], source_depth)
+    return fill, distance
+
+
+def metrics(model, camera, depth, sources, tree, solution):
     """全部方案用原尺寸留出深度，并按实测重投影覆盖分别计分。"""
     coefficient, intercept, scalar, vector = solution
     n = torch.as_tensor(camera.c2w[:3, 2].copy(), dtype=scalar.dtype, device=scalar.device)
@@ -111,13 +144,22 @@ def metrics(model, camera, depth, sources, solution):
     local_depth = global_depth + correction[:, 1]
     reprojected = sensor_reprojection(camera, sources)
     measured = reprojected.isfinite()
+    fill, distance = local_sensor_fill(camera, reprojected, global_depth)
+    nearest = nearest_surface(camera, global_depth, tree)
+    filled = fill.isfinite()
     band = depth_targets(depth, (camera.width, camera.height), scalar.device)
     valid = band[:, 2].bool() & (opacity > .1)
     truth = band[:, :2].mean(-1)
     estimates = {"expected": plain, "global_affine": global_depth, "scalar_adapter": scalar_depth,
                  "world_adapter": local_depth, "direct_plus_affine": torch.where(measured, reprojected, global_depth),
-                 "direct_plus_local": torch.where(measured, reprojected, local_depth)}
-    groups = {"all": valid, "sensor_covered": valid & measured, "sensor_uncovered": valid & ~measured}
+                 "direct_plus_local": torch.where(measured, reprojected, local_depth),
+                 "direct_plus_scalar": torch.where(measured, reprojected, scalar_depth),
+                 "filled_plus_affine": torch.where(filled, fill, global_depth),
+                 "filled_plus_nearest_surface": torch.where(filled, fill, nearest),
+                 "filled_plus_scalar": torch.where(filled, fill, scalar_depth),
+                 "filled_plus_world": torch.where(filled, fill, local_depth)}
+    groups = {"all": valid, "sensor_covered": valid & measured, "sensor_uncovered": valid & ~measured,
+              "away_from_sensor": valid & (distance > 8)}
     rows = {}
     for name, candidate in estimates.items():
         error = (candidate - truth).abs()
@@ -135,6 +177,7 @@ def main():
     parser.add_argument("--checkpoints", required=True, type=Path)
     parser.add_argument("--scene", choices=("room0", "office0", "tum"), required=True)
     parser.add_argument("--phase", type=int, choices=(0, 1), default=0)
+    parser.add_argument("--split", choices=("interleaved", "blocked"), default="interleaved")
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     torch.set_num_threads(2)
@@ -143,15 +186,20 @@ def main():
     model = FrozenGaussians.load(checkpoint)
     cameras, depths, frame_ids = loader(root)
     indices = np.rint(np.linspace(0, len(cameras) - 1, min(10, len(cameras)))).astype(int)
-    calibration, evaluation = indices[args.phase::2], indices[1 - args.phase::2]
+    if args.split == "blocked":
+        parts = np.array_split(indices, 2)
+        calibration, evaluation = parts[args.phase], parts[1 - args.phase]
+    else:
+        calibration, evaluation = indices[args.phase::2], indices[1 - args.phase::2]
     data = [calibration_view(model, cameras[i], depths[i]) for i in calibration]
     solution = solve(model, data)
     points = torch.cat([sensor_points(cameras[i], depths[i], model.xyz.device) for i in calibration])
-    print(f"Five measurements calibrated; testing {len(evaluation)} separate native views", flush=True)
-    result = {"scene": args.scene, "calibration": [int(frame_ids[i]) for i in calibration],
+    tree = cKDTree(points.cpu().numpy())
+    print(f"{len(calibration)} measurements calibrated; testing {len(evaluation)} separate native views", flush=True)
+    result = {"scene": args.scene, "split": args.split, "calibration": [int(frame_ids[i]) for i in calibration],
               "evaluation": [int(frame_ids[i]) for i in evaluation],
               "affine": [float(x) for x in solution[:2]], "views": [
-                  {"frame": int(frame_ids[i]), **metrics(model, cameras[i], depths[i], points, solution)}
+                  {"frame": int(frame_ids[i]), **metrics(model, cameras[i], depths[i], points, tree, solution)}
                   for i in evaluation]}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("x", encoding="utf-8") as sink:
