@@ -7,12 +7,47 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
+from scipy.spatial.transform import Rotation, Slerp
 
 from bench_adaptive_raster import scene_paths
 from probe_depth_adapter import calibration_view, local_sensor_fill, sensor_points, sensor_reprojection, solve
 from probe_depth_repair import depth_targets
 from probe_edit_transport import reduced
-from readout import FrozenGaussians, ordered_alpha_samples
+from prepare_tum import nearest, timed_files, warped_image
+from readout import Camera, FrozenGaussians, ordered_alpha_samples
+
+
+def fresh_tum_depth(prepared, fold):
+    """从同一 TUM 序列读取未用于训练和此前留出的深度帧。"""
+    metadata = json.loads((prepared / "tum-metadata.json").read_text())
+    root = Path(metadata["source"])
+    rgb_time, _ = timed_files(root / "rgb.txt")
+    depth_time, depth_files = timed_files(root / "depth.txt")
+    association = nearest(depth_time, rgb_time)
+    known = set(metadata["training_frames"]) | {item["frame"] for item in metadata["evaluation"]}
+    old_depth = set(association[sorted(known)].tolist())
+    trajectory = np.loadtxt(root / "groundtruth.txt")
+    stamps = trajectory[:, 0]
+    observed = depth_time[association]
+    after = np.searchsorted(stamps, observed).clip(1, len(stamps) - 1)
+    valid = ((np.abs(rgb_time - observed) <= .012) & (observed >= stamps[0]) & (observed <= stamps[-1]) &
+             (stamps[after] - stamps[after - 1] <= .05))
+    pool = np.array([i for i in np.flatnonzero(valid) if i not in known and association[i] not in old_depth], dtype=np.int64)
+    _, unique = np.unique(association[pool], return_index=True)
+    pool = pool[np.sort(unique)]
+    if len(pool) < 48:
+        raise ValueError(f"Only {len(pool)} independent time-aligned depth frames")
+    frames = pool[np.rint(np.linspace(0, len(pool) - 1, 48)).astype(int)][fold::2]
+    timestamps = observed[frames]
+    poses = np.repeat(np.eye(4)[None], len(frames), axis=0)
+    poses[:, :3, :3] = Slerp(stamps, Rotation.from_quat(trajectory[:, 4:]))(timestamps).as_matrix()
+    poses[:, :3, 3] = np.stack([np.interp(timestamps, stamps, trajectory[:, i]) for i in (1, 2, 3)], axis=1)
+    width, height = metadata["image_size"]
+    intrinsic = np.asarray(metadata["intrinsics"])
+    cameras = [Camera(pose, intrinsic, width, height) for pose in poses]
+    depths = [warped_image(root / depth_files[association[i]], cv2.INTER_NEAREST, cv2.IMREAD_UNCHANGED)
+              .astype(np.float32) / 5000. for i in frames]
+    return cameras, depths, frames
 
 
 def view_support(model, native):
@@ -202,6 +237,7 @@ def main():
     p.add_argument("--scene", choices=("room0", "office0", "tum"), required=True)
     p.add_argument("--phase", choices=(0, 1), type=int, default=0)
     p.add_argument("--split", choices=("interleaved", "blocked"), default="interleaved")
+    p.add_argument("--fresh-tum-fold", choices=(0, 1), type=int)
     p.add_argument("--output", required=True, type=Path)
     args = p.parse_args()
     cv2.setNumThreads(2)
@@ -209,7 +245,12 @@ def main():
 
     root, checkpoint, loader = scene_paths(args.data, args.checkpoints, args.scene)
     model = FrozenGaussians.load(checkpoint)
-    camera, depths, frames = loader(root)
+    if args.fresh_tum_fold is not None:
+        if args.scene != "tum":
+            p.error("--fresh-tum-fold requires --scene tum")
+        camera, depths, frames = fresh_tum_depth(root, args.fresh_tum_fold)
+    else:
+        camera, depths, frames = loader(root)
     if args.split == "blocked":
         blocks = np.array_split(np.arange(len(camera)), 2)
         pool, query = blocks[args.phase].tolist(), blocks[1 - args.phase].tolist()
@@ -243,7 +284,8 @@ def main():
                                                         source_dirs, target_dirs, total)
     print("Camera selection complete without sensor evidence", flush=True)
     cached = {}
-    result = {"scene": args.scene, "split": args.split, "pool_frames": [int(frames[i]) for i in pool],
+    result = {"scene": args.scene, "split": args.split, "fresh_tum_fold": args.fresh_tum_fold,
+              "pool_frames": [int(frames[i]) for i in pool],
               "query_frames": [int(frames[i]) for i in query], "methods": {}}
     for method, subset in picks.items():
         if subset not in cached:
