@@ -9,8 +9,9 @@ import numpy as np
 import torch
 
 from evaluate import boundary_pixels, evaluation_pairs, load_replica, project_between_cameras
+from prepare_tum import warped_image
 from probe_two_rays import ray_depths, target_residual
-from readout import FrozenGaussians
+from readout import Camera, FrozenGaussians
 
 
 QUANTILE_WEIGHTS = np.array([.175, .2, .25, .2, .175], dtype=np.float64)
@@ -148,18 +149,42 @@ def disjoint_pairs(cameras, original):
             yield i, j, distance
 
 
+def load_tum(prepared):
+    """读取 3DGS 未见过的 TUM 深度观测，保持与 RGB 相同的像素变换。"""
+    metadata = json.loads((prepared / "tum-metadata.json").read_text())
+    intrinsic = np.asarray(metadata["intrinsics"], dtype=np.float64)
+    width, height = metadata["image_size"]
+    root = Path(metadata["source"])
+    cameras, depths, frames = [], [], []
+    training = set(metadata["training_frames"])
+    for item in metadata["evaluation"]:
+        frame = item["frame"]
+        if frame in training or item["rgb_depth_delta_s"] > .02:
+            raise ValueError(f"Frame {frame} violates the evaluation split")
+        pose = np.asarray(item["pose_c2w"], dtype=np.float64)
+        cameras.append(Camera(pose, intrinsic, width, height))
+        depth = warped_image(root / item["depth"], cv2.INTER_NEAREST, cv2.IMREAD_UNCHANGED)
+        depths.append(depth.astype(np.float32) / 5000.)
+        frames.append(frame)
+    return cameras, depths, frames
+
+
 @torch.inference_mode()
 def main():
     """在冻结模型上运行预留相机对的遮挡及可用对应检验。"""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--replica", type=Path, required=True)
+    dataset = parser.add_mutually_exclusive_group(required=True)
+    dataset.add_argument("--replica", type=Path)
+    dataset.add_argument("--tum", type=Path)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--disjoint-pairs", action="store_true")
     args = parser.parse_args()
     cv2.setNumThreads(2)
     model = FrozenGaussians.load(args.checkpoint)
-    cameras, truth, frames = load_replica(args.replica)
+    prepared = args.replica if args.replica is not None else args.tum
+    loader = load_replica if args.replica is not None else load_tum
+    cameras, truth, frames = loader(prepared)
     pairs = list(evaluation_pairs(cameras))
     if args.disjoint_pairs:
         pairs = list(disjoint_pairs(cameras, pairs))
@@ -170,9 +195,9 @@ def main():
                "scores": compare(cameras[i], cameras[j], truth[i], truth[j], rays[i], rays[j])}
               for i, j, baseline in pairs]
     with args.output.open("x", encoding="utf-8") as sink:
-        json.dump({"scene": args.replica.name, "disjoint_pairs": args.disjoint_pairs,
+        json.dump({"scene": prepared.name, "disjoint_pairs": args.disjoint_pairs,
                    "pairs": result}, sink, allow_nan=False)
-    print(f"{args.replica.name}: {len(result)} pairs complete", flush=True)
+    print(f"{prepared.name}: {len(result)} pairs complete", flush=True)
 
 
 if __name__ == "__main__":

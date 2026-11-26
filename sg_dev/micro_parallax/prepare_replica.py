@@ -65,12 +65,12 @@ def triangulate(first, second, projections, poses):
     return xyz, valid
 
 
-def initialize_points(frames, poses):
+def initialize_points(frames, poses, *, intrinsics=INTRINSICS):
     """只用训练 RGB 和已知相机位姿构造初始化点云。"""
     extractor = cv2.SIFT_create(nfeatures=1400)
     matcher = cv2.BFMatcher()
     features = [extractor.detectAndCompute(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), None) for frame in frames]
-    projections = INTRINSICS @ np.linalg.inv(poses)[:, :3]
+    projections = intrinsics @ np.linalg.inv(poses)[:, :3]
     points = []
     colors = []
     for i, j in choose_pairs(poses):
