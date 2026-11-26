@@ -127,6 +127,77 @@ def measured_edits(cameras, depths):
     return outputs, validities, regions
 
 
+def ridge_pcg(normal, diag, rhs, budget):
+    """对多组编辑分别求解受同一个稀疏正规算子约束的增量。"""
+    pcg = np.zeros_like(rhs)
+    residual = rhs.copy()
+    direction = residual / diag
+    residual_inner = np.sum(residual * direction, axis=0, dtype=np.float64)
+    for _ in range(budget):
+        product = normal(direction)
+        curvature = np.sum(direction * product, axis=0, dtype=np.float64)
+        step = (residual_inner / np.maximum(curvature, 1e-28)).astype(np.float32)
+        pcg += direction * step
+        residual -= product * step
+        preconditioned = residual / diag
+        next_inner = np.sum(residual * preconditioned, axis=0, dtype=np.float64)
+        ratio = (next_inner / np.maximum(residual_inner, 1e-28)).astype(np.float32)
+        direction = preconditioned + direction * ratio
+        residual_inner = next_inner
+    return pcg
+
+
+def spatial_basis(xyz, cell_size, linear):
+    """将每个高斯关联到世界空间中的常数体素或三线性网格顶点。"""
+    coordinate = (xyz - xyz.min(axis=0)) / cell_size
+    cell = np.floor(coordinate).astype(np.int64)
+    fraction = (coordinate - cell).astype(np.float32)
+    offsets = np.indices((2, 2, 2)).reshape(3, -1).T if linear else np.zeros((1, 3), dtype=np.int64)
+    cells = cell[:, None, :] + offsets
+    cells = cells.reshape(-1, 3)
+    # 连续的整数网格键只建立可见高斯连接的自由度。
+    span = cells.max(axis=0) + 1
+    key = np.ravel_multi_index(cells.T, tuple(span))
+    vertices, columns = np.unique(key, return_inverse=True)
+    values = np.where(offsets[None], fraction[:, None], 1 - fraction[:, None]).prod(axis=2)
+    if not linear:
+        values.fill(1)
+    rows = np.repeat(np.arange(len(xyz)), len(offsets))
+    basis = sparse.csr_matrix((values.ravel(), (rows, columns)),
+                              shape=(len(xyz), len(vertices)), dtype=np.float32)
+    basis.eliminate_zeros()
+    return basis
+
+
+def shared_edits(transport, target, xyz, camera, budget=BUDGET):
+    """用近邻高斯共享的低维颜色场，约束编辑在未见视角的传播。"""
+    z = (xyz - camera.c2w[:3, 3]) @ camera.c2w[:3, 2]
+    optical_weight = np.asarray(transport.sum(axis=0)).ravel()
+    order = np.argsort(z)
+    cumulative = np.cumsum(optical_weight[order])
+    reference = z[order[np.searchsorted(cumulative, .5 * cumulative[-1])]]
+    pitch = float(np.clip(.035 * reference, .012, .14))
+    updates, times, counts, objectives = {}, {}, {}, {}
+    for name, linear in (("voxel_constant", False), ("voxel_trilinear", True)):
+        started = perf_counter()
+        basis = spatial_basis(xyz, pitch, linear)
+        design = (transport @ basis).tocsr()
+        adjoint = design.T.tocsr()
+        mass = np.asarray(design.sum(axis=0)).ravel()[:, None]
+        ridge = REGULARIZATION * np.maximum(mass, .03)
+        diagonal = np.asarray(design.power(2).sum(axis=0)).ravel()[:, None] + ridge
+
+        def normal(value):
+            return adjoint @ (design @ value) + ridge * value
+
+        coefficients = ridge_pcg(normal, diagonal, adjoint @ target, budget)
+        updates[name] = basis @ coefficients
+        times[name] = perf_counter() - started
+        counts[name] = basis.shape[1]
+        objectives[name] = float(np.sum((design @ coefficients - target) ** 2) + np.sum(ridge * coefficients ** 2))
+    return updates, times, counts, objectives, pitch
+
+
 def solve_edits(transport, target, budget=BUDGET):
     """使用相同观测、正则化和矩阵乘预算比较两种回写更新。
 
@@ -156,21 +227,7 @@ def solve_edits(transport, target, budget=BUDGET):
     time_log["instant_iterative"] = perf_counter() - started
 
     started = perf_counter()
-    pcg = np.zeros_like(rhs)
-    residual = rhs.copy()
-    direction = residual / diag
-    residual_inner = np.sum(residual * direction, axis=0, dtype=np.float64)
-    for _ in range(budget):
-        product = normal(direction)
-        curvature = np.sum(direction * product, axis=0, dtype=np.float64)
-        step = (residual_inner / np.maximum(curvature, 1e-28)).astype(np.float32)
-        pcg += direction * step
-        residual -= product * step
-        preconditioned = residual / diag
-        next_inner = np.sum(residual * preconditioned, axis=0, dtype=np.float64)
-        ratio = (next_inner / np.maximum(residual_inner, 1e-28)).astype(np.float32)
-        direction = preconditioned + direction * ratio
-        residual_inner = next_inner
+    pcg = ridge_pcg(normal, diag, rhs, budget)
     time_log["joint_pcg"] = perf_counter() - started
 
     signs = np.sign(np.sum(target, axis=0)).astype(np.float32)
@@ -241,6 +298,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--max-width", type=int, default=200)
     parser.add_argument("--independent-depth", action="store_true")
+    parser.add_argument("--spatial-basis", action="store_true")
     args = parser.parse_args()
     torch.set_num_threads(2)
     loader = load_tum if args.tum else load_replica
@@ -262,6 +320,13 @@ def main():
     active = np.flatnonzero(np.asarray(observed.sum(axis=0)).ravel())
     fit = observed[:, active].tocsr()
     edits, seconds, objectives = solve_edits(fit, targets)
+    basis_result = None
+    if args.spatial_basis:
+        shared, times, counts, losses, pitch = shared_edits(fit, targets, model.xyz.cpu().numpy()[active], cameras[0])
+        edits.update(shared)
+        seconds.update(times)
+        objectives.update(losses)
+        basis_result = {"pitch": pitch, "coefficients_per_method": counts}
     cancellations = {}
     for name, update in edits.items():
         cancellation = (fit @ np.abs(update)) - np.abs(fit @ update)
@@ -281,6 +346,7 @@ def main():
         "image_size": [cameras[0].width, cameras[0].height], "active_splats": len(active),
         "maximum_rgb_forward_error": float(max(discrepancies)), "budget": BUDGET,
         "independent_depth": args.independent_depth, "source_cancellation": cancellations,
+        "spatial_basis": basis_result,
         "elapsed_solve_seconds": seconds, "training_objective": objectives, "held_out_scores": tested,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
