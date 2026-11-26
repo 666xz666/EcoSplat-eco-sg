@@ -77,6 +77,13 @@ def reference_image(model, camera, colors, order):
     return result.reshape(-1, 3).clamp(0, 1)
 
 
+def tile_batch_count(offsets, entries, tile):
+    """按最拥挤的实际 tile 计算相交批次数，避免遍历空批次。"""
+    bounds = torch.cat((offsets.flatten().long(), offsets.new_tensor([entries], dtype=torch.int64)))
+    maximum = int((bounds[1:] - bounds[:-1]).max())
+    return max(1, (maximum + tile * tile - 1) // (tile * tile))
+
+
 def expanded_samples(metadata, width, height):
     """在中心投影上保留可能进入整像素盒的贡献，透明度仍由原高斯计算。"""
     threshold = 1 / 255
@@ -96,10 +103,18 @@ def expanded_samples(metadata, width, height):
     tile, tw, th = (metadata[key] for key in ("tile_size", "tile_width", "tile_height"))
     _, ids, flat = isect_tiles(means, radii, depths, tile, tw, th)
     offsets = isect_offset_encode(ids, 1, tw, th)
-    layers, pixels, _ = rasterize_to_indices_in_range(
-        0, max(1, (flat.numel() + tile * tile - 1) // (tile * tile)),
-        torch.ones((1, height, width), device=means.device), means, proposal_conics,
-        proposal_opacity, width, height, tile, offsets, flat)
+    batches = tile_batch_count(offsets, flat.numel(), tile)
+    # 每段在近似低透明度下保持透过率高于内核的提前截止阈值。
+    chunk_size = max(1, 2048 // (tile * tile))
+    layer_chunks, pixel_chunks = [], []
+    transmittance = torch.ones((1, height, width), device=means.device)
+    for start in range(0, batches, chunk_size):
+        layers, pixels, _ = rasterize_to_indices_in_range(
+            start, min(start + chunk_size, batches), transmittance, means, proposal_conics,
+            proposal_opacity, width, height, tile, offsets, flat)
+        layer_chunks.append(layers)
+        pixel_chunks.append(pixels)
+    layers, pixels = torch.cat(layer_chunks), torch.cat(pixel_chunks)
     # 保持每条射线的同深度高斯顺序，避免在比较时改变遮挡顺序。
     count = depths.shape[-1]
     rank = torch.empty(count, dtype=torch.int64, device=means.device)
