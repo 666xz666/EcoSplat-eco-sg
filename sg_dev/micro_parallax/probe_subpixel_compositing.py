@@ -161,9 +161,60 @@ def raster_estimates(camera, native, metadata, colors, *, padded=False):
         approximated = torch.where(approximated >= threshold, approximated, 0)
         blur = sum_colors(composite(approximated, starts, counts), colors[i], pixel, w * h)
         return {"padded_per_splat_box": separable, "padded_second_order": separable + change_rgb,
-                "padded_analytic_box": blur + change_rgb, "padded_four_phase": exact}, counts.max().item()
+                "padded_analytic_box": blur + change_rgb, "padded_four_phase": exact}, (change_rgb, pixel, int(counts.max()))
     return {"center": native.reshape(-1, 3), "per_splat_box": separable,
             "second_order": separable + change_rgb, "four_phase_same_samples": exact}, change_rgb
+
+
+def area_budget(camera, base, precise, center, ref, corr, pixels):
+    """按候选光栅项计费，在同一额外预算模拟各类 tile 选点。"""
+    w, h = camera.width, camera.height
+    tile_side = 8
+    tw = (w + tile_side - 1) // tile_side
+    th = (h + tile_side - 1) // tile_side
+    count = tw * th
+    pos = torch.arange(w * h, device=base.device)
+    tile_ids = (pos // w // tile_side) * tw + (pos % w) // tile_side
+    weights = torch.bincount(tile_ids[pixels], minlength=count).cpu().numpy()
+    tile_array = tile_ids.cpu().numpy()
+    pixel_count = np.bincount(tile_array, minlength=count)
+    weights += pixel_count
+    f = base.view(h, w, 3)
+    dx = torch.zeros_like(f)
+    dy = torch.zeros_like(f)
+    dx[:, 1:] = f[:, 1:] - f[:, :-1]
+    dy[1:] = f[1:] - f[:-1]
+    gradients = (dx.square() + dy.square()).sum(dim=-1).flatten()
+    base_error = (base - ref).square().sum(dim=-1)
+    exact_error = (precise - ref).square().sum(dim=-1)
+    pixel_scores = {"image_gradient": gradients,
+                    "prefilter_difference": (center - base).square().sum(dim=-1),
+                    "alpha_correlation": corr.square().sum(dim=-1),
+                    "oracle": base_error - exact_error}
+    scores = {name: torch.bincount(tile_ids, weights=score, minlength=count).cpu().numpy()
+              for name, score in pixel_scores.items()}
+    scores["layer_count"] = weights.astype(np.float64) ** 2 / pixel_count
+    scores["uniform"] = np.random.default_rng(0).random(count) * weights
+    selected = {}
+    total = int(weights.sum())
+    base_np = base_error.cpu().numpy()
+    fine_np = exact_error.cpu().numpy()
+    for rate in (.1, .2, .35):
+        stats = {}
+        for name, score in scores.items():
+            order = np.argsort(-score / np.maximum(weights, 1), kind="stable")
+            used = 0
+            mask = np.zeros(count, dtype=bool)
+            for idx in order:
+                if used + weights[idx] <= rate * total:
+                    used += int(weights[idx])
+                    mask[idx] = True
+            chosen = mask[tile_array]
+            absolute = float(np.where(chosen, fine_np, base_np).mean() / 3)
+            stats[name] = {"mse": absolute, "realized_cost_fraction": used / total,
+                           "pixel_fraction": float(chosen.mean())}
+        selected[str(rate)] = stats
+    return selected
 
 
 def compare(model, camera, padded):
@@ -173,14 +224,18 @@ def compare(model, camera, padded):
     ref = reference_image(model, camera, colors, order=4)
     estimates, correction = raster_estimates(camera, rgb[0], meta, colors)
     estimates["four_phase_native"] = reference_image(model, camera, colors, order=2)
-    padded_seconds, maximum_samples = None, None
+    padded_seconds, maximum_samples, budget = None, None, None
     if padded:
         torch.cuda.synchronize()
         started = perf_counter()
-        expanded, maximum_samples = raster_estimates(camera, rgb[0], meta, colors, padded=True)
+        expanded, info = raster_estimates(camera, rgb[0], meta, colors, padded=True)
+        corr, pixels, maximum_samples = info
         torch.cuda.synchronize()
         padded_seconds = perf_counter() - started
         estimates.update(expanded)
+        budget = area_budget(camera, expanded["padded_per_splat_box"].clamp(0, 1),
+                             expanded["padded_four_phase"].clamp(0, 1),
+                             estimates["center"].clamp(0, 1), ref, corr, pixels)
     w, h = camera.width, camera.height
     color = ref.view(h, w, 3)
     dx = torch.zeros_like(color)
@@ -194,7 +249,7 @@ def compare(model, camera, padded):
         error = result.clamp(0, 1) - ref
         metrics[name] = {"mse": float(error.square().mean()), "edge_mse": float(error[edge].square().mean()),
                          "mae": float(error.abs().mean())}
-    return metrics, float(correction.abs().mean()), padded_seconds, maximum_samples
+    return metrics, float(correction.abs().mean()), padded_seconds, maximum_samples, budget
 
 
 @torch.inference_mode()
@@ -216,10 +271,11 @@ def main():
     result = []
     for i in (1, 5)[:args.views]:
         camera = reduced(cameras[i], 108)
-        metrics, delta, seconds, count = compare(model, camera, args.padded)
+        metrics, delta, seconds, count, budget = compare(model, camera, args.padded)
         result.append({"frame": names[i], "image_size": [camera.width, camera.height],
                        "metrics": metrics, "mean_abs_correlation": delta,
-                       "padded_prototype_seconds": seconds, "max_padded_samples": count})
+                       "padded_prototype_seconds": seconds, "max_padded_samples": count,
+                       "adaptive_sample_budget": budget})
         print(f"View {names[i]}: {metrics}", flush=True)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("x", encoding="utf-8") as sink:
