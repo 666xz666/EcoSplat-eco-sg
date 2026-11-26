@@ -4,9 +4,11 @@ import argparse
 import itertools
 import json
 from pathlib import Path
+from time import perf_counter
 
 import numpy as np
 import torch
+from gsplat.cuda._wrapper import isect_offset_encode, isect_tiles, rasterize_to_indices_in_range
 
 from evaluate import load_replica
 from probe_edit_transport import reduced, select_views
@@ -75,19 +77,72 @@ def reference_image(model, camera, colors, order):
     return result.reshape(-1, 3).clamp(0, 1)
 
 
-def raster_estimates(camera, native, metadata, colors):
+def expanded_samples(metadata, width, height):
+    """在中心投影上保留可能进入整像素盒的贡献，透明度仍由原高斯计算。"""
+    threshold = 1 / 255
+    proposal = 1.005
+    means, conics, depths = (metadata[key] for key in ("means2d", "conics", "depths"))
+    radii = metadata["radii"]
+    opacity = metadata["opacities"]
+    valid = (radii > 0).all(dim=-1) & (opacity > threshold)
+    a, b, c = conics.unbind(dim=-1)
+    largest = .5 * (a + c + torch.sqrt((a - c).square() + 4 * b.square()))
+    # 高斯阈值椭圆在像素盒内按 Q 范数膨胀。盒内最大位移不超过 sqrt(1/2)。
+    max_norm = torch.sqrt(2 * (opacity / threshold).clamp_min(1).log()) + torch.sqrt(.5 * largest.clamp_min(0))
+    factor = float(2 * np.log(proposal)) / max_norm.square().clamp_min(1e-6)
+    proposal_conics = torch.where(valid[..., None], conics * factor[..., None], 0).contiguous()
+    proposal_opacity = torch.where(valid, torch.full_like(opacity, proposal * threshold), 0).contiguous()
+    radii = torch.where(valid[..., None], radii + 1, 0).contiguous()
+    tile, tw, th = (metadata[key] for key in ("tile_size", "tile_width", "tile_height"))
+    _, ids, flat = isect_tiles(means, radii, depths, tile, tw, th)
+    offsets = isect_offset_encode(ids, 1, tw, th)
+    layers, pixels, _ = rasterize_to_indices_in_range(
+        0, max(1, (flat.numel() + tile * tile - 1) // (tile * tile)),
+        torch.ones((1, height, width), device=means.device), means, proposal_conics,
+        proposal_opacity, width, height, tile, offsets, flat)
+    # 保持每条射线的同深度高斯顺序，避免在比较时改变遮挡顺序。
+    count = depths.shape[-1]
+    rank = torch.empty(count, dtype=torch.int64, device=means.device)
+    rank[depths[0].argsort(stable=True)] = torch.arange(count, device=means.device)
+    order = (pixels.long() * count + rank[layers.long()]).argsort()
+    return pixels[order].long(), layers[order].long()
+
+
+def analytic_mean(a, b, c, dx, dy, opacity):
+    """用与像素盒方差相同的高斯核近似计算单项平均 alpha。"""
+    variance = 1 / 12
+    determinant = (a * c - b.square()).clamp_min(0)
+    volume = 1 + variance * (a + c) + variance ** 2 * determinant
+    qa = (a + variance * determinant) / volume
+    qc = (c + variance * determinant) / volume
+    qb = b / volume
+    sigma = .5 * (qa * dx.square() + qc * dy.square()) + qb * dx * dy
+    return (opacity * torch.rsqrt(volume) * torch.exp(-sigma)).clamp(0, .999)
+
+
+def raster_estimates(camera, native, metadata, colors, *, padded=False):
     """保持相同中心贡献列表，分离逐项平均与整条射线平均。"""
     w, h = camera.width, camera.height
-    pixel, i, alpha, cumulative, _ = ordered_alpha_samples(metadata, w, h)
+    if padded:
+        pixel, i = expanded_samples(metadata, w, h)
+    else:
+        pixel, i, alpha, cumulative, _ = ordered_alpha_samples(metadata, w, h)
     _, counts = torch.unique_consecutive(pixel, return_counts=True)
     starts = counts.cumsum(dim=0) - counts
     xy = torch.stack((pixel % w + .5, pixel // w + .5), dim=-1)
     dx, dy = (metadata["means2d"][0, i] - xy).unbind(-1)
     a, b, c = metadata["conics"][0, i].unbind(-1)
     opacity = metadata["opacities"][0, i]
+    threshold = 1 / 255
+    if padded:
+        sigma = .5 * (a * dx.square() + c * dy.square()) + b * dx * dy
+        alpha = (opacity * torch.exp(-sigma)).clamp(0, .999)
+        alpha = torch.where(alpha >= threshold, alpha, 0)
+        front = torch.exp(-exclusive(-torch.log1p(-alpha), starts, counts))
+    else:
+        front = torch.exp(-(cumulative + torch.log1p(-alpha)))
     grads = alpha[:, None] * torch.stack((a * dx + b * dy, b * dx + c * dy), dim=-1)
     grads = torch.where((alpha < .999)[:, None], grads, 0)
-    front = torch.exp(-(cumulative + torch.log1p(-alpha)))
     change = correlation(alpha, grads, front, starts, counts)
     change_rgb = sum_colors(change, colors[i], pixel, w * h)
     phase = float(np.sqrt(1 / 12))
@@ -96,20 +151,36 @@ def raster_estimates(camera, native, metadata, colors):
     for u, v in itertools.product((-phase, phase), repeat=2):
         x, y = dx - u, dy - v
         sample = (opacity * torch.exp(-.5 * (a * x * x + c * y * y) - b * x * y)).clamp(0, .999)
+        if padded:
+            sample = torch.where(sample >= threshold, sample, 0)
         total_alpha += sample / 4
         exact += sum_colors(composite(sample, starts, counts), colors[i], pixel, w * h) / 4
     separable = sum_colors(composite(total_alpha, starts, counts), colors[i], pixel, w * h)
+    if padded:
+        approximated = analytic_mean(a, b, c, dx, dy, opacity)
+        approximated = torch.where(approximated >= threshold, approximated, 0)
+        blur = sum_colors(composite(approximated, starts, counts), colors[i], pixel, w * h)
+        return {"padded_per_splat_box": separable, "padded_second_order": separable + change_rgb,
+                "padded_analytic_box": blur + change_rgb, "padded_four_phase": exact}, counts.max().item()
     return {"center": native.reshape(-1, 3), "per_splat_box": separable,
             "second_order": separable + change_rgb, "four_phase_same_samples": exact}, change_rgb
 
 
-def compare(model, camera):
+def compare(model, camera, padded):
     """以留出像素盒真值对照中心采样与不同合成近似。"""
     colors = model.colors(camera)
     rgb, _, meta = model.render(camera, colors)
     ref = reference_image(model, camera, colors, order=4)
     estimates, correction = raster_estimates(camera, rgb[0], meta, colors)
     estimates["four_phase_native"] = reference_image(model, camera, colors, order=2)
+    padded_seconds, maximum_samples = None, None
+    if padded:
+        torch.cuda.synchronize()
+        started = perf_counter()
+        expanded, maximum_samples = raster_estimates(camera, rgb[0], meta, colors, padded=True)
+        torch.cuda.synchronize()
+        padded_seconds = perf_counter() - started
+        estimates.update(expanded)
     w, h = camera.width, camera.height
     color = ref.view(h, w, 3)
     dx = torch.zeros_like(color)
@@ -123,7 +194,7 @@ def compare(model, camera):
         error = result.clamp(0, 1) - ref
         metrics[name] = {"mse": float(error.square().mean()), "edge_mse": float(error[edge].square().mean()),
                          "mae": float(error.abs().mean())}
-    return metrics, float(correction.abs().mean())
+    return metrics, float(correction.abs().mean()), padded_seconds, maximum_samples
 
 
 @torch.inference_mode()
@@ -136,6 +207,7 @@ def main():
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--views", type=int, default=2, choices=(1, 2))
+    parser.add_argument("--padded", action="store_true")
     args = parser.parse_args()
     loader = load_tum if args.tum else load_replica
     cameras, _, names = loader(args.tum or args.replica)
@@ -144,9 +216,10 @@ def main():
     result = []
     for i in (1, 5)[:args.views]:
         camera = reduced(cameras[i], 108)
-        metrics, delta = compare(model, camera)
+        metrics, delta, seconds, count = compare(model, camera, args.padded)
         result.append({"frame": names[i], "image_size": [camera.width, camera.height],
-                       "metrics": metrics, "mean_abs_correlation": delta})
+                       "metrics": metrics, "mean_abs_correlation": delta,
+                       "padded_prototype_seconds": seconds, "max_padded_samples": count})
         print(f"View {names[i]}: {metrics}", flush=True)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("x", encoding="utf-8") as sink:
