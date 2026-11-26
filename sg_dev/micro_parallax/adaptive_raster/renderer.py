@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from functools import lru_cache
+import os
 from pathlib import Path
 
 import numpy as np
@@ -25,6 +26,7 @@ def adaptive_extension():
     return load(
         name="ecosplat_adaptive_subpixel_cuda",
         sources=[str(root / "bindings.cpp"), str(root / "kernels.cu")],
+        build_directory=os.getenv("ADAPTIVE_RASTER_BUILD_DIR"),
         extra_cflags=["-O3"], extra_cuda_cflags=["-O3", "--use_fast_math"],
         verbose=True,
     )
@@ -139,8 +141,7 @@ class Renderer:
         out = self.gsplat(self.colors(), K, width, height, eps)
         if (width, height) == (self.w, self.h):
             return out
-        pooled = F.adaptive_avg_pool2d(out.permute(2, 0, 1)[None], (self.h, self.w))
-        return pooled[0].permute(1, 2, 0).contiguous()
+        return adaptive_extension().downsample_box(out.contiguous(), self.w, self.h)
 
     def gaussian_blending(self):
         """直接调用官方推理扩展，给定与其他渲染器相同的每视角颜色。"""

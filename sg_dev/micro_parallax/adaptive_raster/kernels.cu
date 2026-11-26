@@ -294,3 +294,47 @@ void render_selected(const at::Tensor& means, const at::Tensor& color, const at:
         reinterpret_cast<float3*>(image.data_ptr<float>()));
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
+
+namespace {
+
+__global__ void downsample_kernel(const float3* input, float3* output,
+                                  int source_w, int source_h, int width, int height) {
+    const int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= width * height) return;
+    const int x = index % width;
+    const int y = index / width;
+    const float sx = static_cast<float>(source_w) / width;
+    const float sy = static_cast<float>(source_h) / height;
+    const float left = x * sx;
+    const float right = (x + 1) * sx;
+    const float top = y * sy;
+    const float bottom = (y + 1) * sy;
+    float3 sum = make_float3(0.0f, 0.0f, 0.0f);
+    for (int j = static_cast<int>(top); j < min(source_h, static_cast<int>(ceilf(bottom))); ++j) {
+        const float wy = fminf(bottom, j + 1.0f) - fmaxf(top, static_cast<float>(j));
+        for (int i = static_cast<int>(left); i < min(source_w, static_cast<int>(ceilf(right))); ++i) {
+            const float wx = fminf(right, i + 1.0f) - fmaxf(left, static_cast<float>(i));
+            sum = accumulate(sum, wx * wy, input[j * source_w + i]);
+        }
+    }
+    const float scale = 1.0f / (sx * sy);
+    output[index] = make_float3(sum.x * scale, sum.y * scale, sum.z * scale);
+}
+
+}  // namespace
+
+at::Tensor downsample_box(const at::Tensor& input, int width, int height) {
+    require_tensor(input, at::kFloat);
+    TORCH_CHECK(input.dim() == 3 && input.size(2) == 3 && width > 0 && height > 0 &&
+                input.size(0) >= height && input.size(1) >= width, "Expected HWC RGB downsampling");
+    if (input.size(0) == height && input.size(1) == width) return input;
+    c10::cuda::CUDAGuard guard(input.device());
+    auto output = at::empty({height, width, 3}, input.options());
+    const int count = width * height;
+    downsample_kernel<<<(count + 255) / 256, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+        reinterpret_cast<const float3*>(input.data_ptr<float>()),
+        reinterpret_cast<float3*>(output.data_ptr<float>()),
+        input.size(1), input.size(0), width, height);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return output;
+}

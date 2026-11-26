@@ -14,8 +14,11 @@ void render_selected(
     const at::Tensor& offsets, const at::Tensor& ids, const at::Tensor& selected,
     at::Tensor& image, int width, int height);
 
+at::Tensor downsample_box(const at::Tensor& input, int width, int height);
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     module.def("prepare_footprints", &prepare_footprints);
     module.def("render_base", &render_base);
     module.def("render_selected", &render_selected);
+    module.def("downsample_box", &downsample_box);
 }
