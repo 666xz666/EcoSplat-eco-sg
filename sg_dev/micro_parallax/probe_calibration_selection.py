@@ -102,7 +102,31 @@ def pose_scores(pool, target, device):
                            device=device, dtype=torch.float32)
 
 
-def evaluate(model, camera, depth, points, solution):
+def reject_free_space_conflicts(cloud, sources, source_index):
+    """检查该帧点是否被其他实测深度表明位于自由空间。"""
+    support = torch.zeros(len(cloud), dtype=torch.int32, device=cloud.device)
+    conflict = torch.zeros_like(support)
+    for i, (camera, band) in enumerate(sources):
+        if i == source_index:
+            continue
+        pose = torch.as_tensor(np.linalg.inv(camera.c2w), device=cloud.device, dtype=cloud.dtype)
+        local = cloud @ pose[:3, :3].T + pose[:3, 3]
+        z = local[:, 2]
+        fx, fy = camera.intrinsic.diagonal()[:2]
+        cx, cy = camera.intrinsic[:2, 2]
+        u = (local[:, 0] / z.clamp_min(.1) * fx + cx).round().long()
+        v = (local[:, 1] / z.clamp_min(.1) * fy + cy).round().long()
+        inside = (z > .1) & (u >= 0) & (u < camera.width) & (v >= 0) & (v < camera.height)
+        index = v.clamp(0, camera.height - 1) * camera.width + u.clamp(0, camera.width - 1)
+        lo, hi, valid = band[index].unbind(-1)
+        available = inside & valid.bool()
+        support += available & (z >= lo) & (z <= hi)
+        conflict += available & (z < lo)
+    # 仅看到更前面的东西时，该测量仍可能在另一张图中被遮挡。
+    return (support > 0) | (conflict == 0)
+
+
+def evaluate(model, camera, depth, points, checked_points, solution):
     """与传感器重投影结合后，记录独立相机的原尺寸深度误差。"""
     coefficient, intercept, scalar, _ = solution
     render, opacity, _ = model.render(camera, scalar[:, None], with_depth=True)
@@ -112,13 +136,17 @@ def evaluate(model, camera, depth, points, solution):
     prior = coefficient * plain + intercept
     direct = sensor_reprojection(camera, points)
     filled, distance = local_sensor_fill(camera, direct, prior)
+    checked = sensor_reprojection(camera, checked_points)
+    checked_fill, _ = local_sensor_fill(camera, checked, prior)
     band = depth_targets(depth, (camera.width, camera.height), model.xyz.device)
     valid = band[:, 2].bool() & (weight > .1)
     truth = band[:, :2].mean(-1)
     values = {"original": plain, "filled_plus_affine": torch.where(filled.isfinite(), filled, prior),
-              "filled_plus_adapter": torch.where(filled.isfinite(), filled, prior + residual)}
+              "filled_plus_adapter": torch.where(filled.isfinite(), filled, prior + residual),
+              "consensus_plus_adapter": torch.where(checked_fill.isfinite(), checked_fill, prior + residual)}
     return {"valid": int(valid.sum()), "filled": int((valid & filled.isfinite()).sum()),
             "far": int((valid & (distance > 8)).sum()),
+            "consensus_filled": int((valid & checked_fill.isfinite()).sum()),
             "methods": {name: {"sum_abs": float((value - truth).abs()[valid].sum()),
                                "within_10cm": int(((value - truth).abs()[valid] < .1).sum())}
                         for name, value in values.items()}}
@@ -169,9 +197,16 @@ def main():
             indices = [pool[i] for i in subset]
             sessions = [calibration_view(model, camera[i], depths[i]) for i in indices]
             solution = solve(model, sessions)
-            points = torch.cat([sensor_points(camera[i], depths[i], model.xyz.device) for i in indices])
+            clouds = [sensor_points(camera[i], depths[i], model.xyz.device) for i in indices]
+            sources = [(camera[i], depth_targets(depths[i], (camera[i].width, camera[i].height), model.xyz.device))
+                       for i in indices]
+            points = torch.cat(clouds)
+            checked = torch.cat([cloud[reject_free_space_conflicts(cloud, sources, j)]
+                                 for j, cloud in enumerate(clouds)])
             cached[subset] = {"frames": [int(frames[i]) for i in indices],
-                              "metrics": [evaluate(model, camera[i], depths[i], points, solution) for i in query]}
+                              "sensor_samples": len(points), "retained_samples": len(checked),
+                              "metrics": [evaluate(model, camera[i], depths[i], points, checked, solution)
+                                          for i in query]}
         result["methods"][method] = cached[subset]
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("x", encoding="utf-8") as sink:
