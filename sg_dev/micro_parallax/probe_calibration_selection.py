@@ -126,6 +126,47 @@ def reject_free_space_conflicts(cloud, sources, source_index):
     return (support > 0) | (conflict == 0)
 
 
+def view_directions(model, cameras):
+    """返回各相机对同一高斯的世界坐标观测方向，形状 (V, N, 3)。"""
+    centers = np.stack([c.c2w[:3, 3] for c in cameras])
+    centers = torch.as_tensor(centers, device=model.xyz.device, dtype=model.xyz.dtype)
+    return torch.nn.functional.normalize(model.xyz[None, :, :] - centers[:, None, :], dim=-1)
+
+
+def angular_novelty(xyz, cameras, evidence, directions, total):
+    """把 COVER 的角度新颖度适配到冻结地图和零张预采测深的情形。"""
+    # 首张测深选择光栅覆盖最大的相机，随后按论文的角度相似度选新方向。
+    picks = [int(evidence.sum(dim=1).argmax())]
+    visible = []
+    for c in cameras:
+        pose = torch.as_tensor(np.linalg.inv(c.c2w), device=directions.device, dtype=directions.dtype)
+        local = xyz @ pose[:3, :3].T + pose[:3, 3]
+        z = local[:, 2]
+        fx, fy = c.intrinsic.diagonal()[:2]
+        cx, cy = c.intrinsic[0, 2], c.intrinsic[1, 2]
+        u = local[:, 0] / z.clamp_min(.1) * fx + cx
+        v = local[:, 1] / z.clamp_min(.1) * fy + cy
+        visible.append((z > .1) & (u >= 0) & (u < c.width) & (v >= 0) & (v < c.height))
+    visible = torch.stack(visible)
+    similar = torch.zeros_like(evidence)
+    for _ in range(1, total):
+        last = picks[-1]
+        part = ((directions * directions[last]).sum(-1).clamp(-1, 1) + 1) / 2
+        similar = torch.maximum(similar, part * visible[last])
+        score = (evidence * (1 - similar)).sum(dim=1) / evidence.sum(dim=1).clamp_min(1e-7)
+        score[picks] = -torch.inf
+        picks.append(int(score.argmax()))
+    return tuple(sorted(picks))
+
+
+def target_angular_cover(source_weight, target_weight, source, target, total):
+    """最大化目标视角实际可见表面的测深支持，并惩罚大角度转移。"""
+    agreement = torch.einsum("vnc,tnc->vtn", source, target).clamp(-1, 1)
+    reliability = torch.exp((agreement - 1) / .125)
+    metric_support = source_weight[:, None, :] * reliability
+    return facility(metric_support.flatten(1), target_weight.flatten(), total)
+
+
 def evaluate(model, camera, depth, points, checked_points, solution):
     """与传感器重投影结合后，记录独立相机的原尺寸深度误差。"""
     coefficient, intercept, scalar, _ = solution
@@ -160,6 +201,7 @@ def main():
     p.add_argument("--checkpoints", required=True, type=Path)
     p.add_argument("--scene", choices=("room0", "office0", "tum"), required=True)
     p.add_argument("--phase", choices=(0, 1), type=int, default=0)
+    p.add_argument("--split", choices=("interleaved", "blocked"), default="interleaved")
     p.add_argument("--output", required=True, type=Path)
     args = p.parse_args()
     cv2.setNumThreads(2)
@@ -168,8 +210,12 @@ def main():
     root, checkpoint, loader = scene_paths(args.data, args.checkpoints, args.scene)
     model = FrozenGaussians.load(checkpoint)
     camera, depths, frames = loader(root)
-    pool = list(range(args.phase, len(camera), 2))
-    query = list(range(1 - args.phase, len(camera), 2))
+    if args.split == "blocked":
+        blocks = np.array_split(np.arange(len(camera)), 2)
+        pool, query = blocks[args.phase].tolist(), blocks[1 - args.phase].tolist()
+    else:
+        pool = list(range(args.phase, len(camera), 2))
+        query = list(range(1 - args.phase, len(camera), 2))
     query = [query[i] for i in np.rint(np.linspace(0, len(query) - 1, 5)).astype(int)]
     source_views = [view_support(model, camera[i]) for i in pool]
     target_views = [view_support(model, camera[i]) for i in query]
@@ -188,9 +234,16 @@ def main():
     by_ray = torch.stack([torch.cat([range_scores(a, b) for _, b in target_views])
                           for _, a in source_views])
     picks["metric_surface_cover"] = facility(by_ray, torch.ones_like(by_ray[0]), total)
+    source_cameras = [camera[i] for i in pool]
+    source_dirs = view_directions(model, source_cameras)
+    target_dirs = view_directions(model, [camera[i] for i in query])
+    picks["cover_angular_adapted"] = angular_novelty(model.xyz, source_cameras, candidates[:, :, 0], source_dirs, total)
+    picks["target_angular_cover"] = target_angular_cover(-torch.expm1(-scale * candidates[:, :, 0]),
+                                                        torch.stack([s[:, 0] for s, _ in target_views]),
+                                                        source_dirs, target_dirs, total)
     print("Camera selection complete without sensor evidence", flush=True)
     cached = {}
-    result = {"scene": args.scene, "pool_frames": [int(frames[i]) for i in pool],
+    result = {"scene": args.scene, "split": args.split, "pool_frames": [int(frames[i]) for i in pool],
               "query_frames": [int(frames[i]) for i in query], "methods": {}}
     for method, subset in picks.items():
         if subset not in cached:
